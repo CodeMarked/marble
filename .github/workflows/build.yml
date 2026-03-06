@@ -1,0 +1,24 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+
+  build:
+
+    runs-on: windows-latest
+
+    steps:
+
+    - uses: actions/checkout@v3
+
+    - name: Setup CMake
+      uses: lukka/get-cmake@latest
+
+    - name: Configure
+      run: cmake -B build -S .
+
+    - name: Build
+      run: cmake --build build
