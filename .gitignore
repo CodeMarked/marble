@@ -1,0 +1,9 @@
+build/
+out/
+.vs/
+.vscode/
+*.user
+*.suo
+*.sln
+*.vcxproj*
+compile_commands.json
