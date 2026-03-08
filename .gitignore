@@ -1,0 +1,11 @@
+build/
+out/
+marble/
+.vs/
+.vscode/
+.cursor/
+*.user
+*.suo
+*.sln
+*.vcxproj*
+compile_commands.json
