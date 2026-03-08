@@ -17,8 +17,16 @@ jobs:
     - name: Setup CMake
       uses: lukka/get-cmake@latest
 
+    - name: Setup vcpkg and install Vulkan
+      run: |
+        git clone https://github.com/microsoft/vcpkg.git --depth 1
+        .\vcpkg\bootstrap-vcpkg.bat
+        .\vcpkg\vcpkg install vulkan-headers vulkan-loader:x64-windows
+
     - name: Configure
-      run: cmake -B build -S .
+      run: |
+        $tc = Join-Path $env:GITHUB_WORKSPACE "vcpkg\scripts\buildsystems\vcpkg.cmake"
+        cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE="$tc"
 
     - name: Build
       run: cmake --build build
