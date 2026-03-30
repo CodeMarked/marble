@@ -1,20 +1,63 @@
-#include "platform/window/Window.hpp"
-#include <iostream>
+#include "core/Engine.hpp"
+#include "core/Log.hpp"
 
-int main()
+#include <string>
+
+int main(int argc, char** argv)
 {
-    std::cout << "Marble game starting\n";
+    using marble::core::LogChannel;
+    using marble::core::LogChannelMask;
+    using marble::core::logPrintf;
 
-    auto window = marble::platform::Window::create("Marble", 1280, 720);
-    if (!window) {
-        std::cerr << "Failed to create window\n";
+    constexpr LogChannelMask kGeneral = static_cast<LogChannelMask>(LogChannel::General);
+
+    (void)logPrintf(0, kGeneral, "Marble game starting");
+
+    marble::core::Engine::Config config {};
+    config.resolveAssetsRoot = true;
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--headless") {
+            config.headless = true;
+            continue;
+        }
+        if (arg == "--assets" && (i + 1) < argc) {
+            config.assetsRootOverride = argv[++i];
+            continue;
+        }
+        if (arg == "--require-assets") {
+            config.requireAssetsDirectory = true;
+            continue;
+        }
+        if (arg == "--frames" && (i + 1) < argc) {
+            try {
+                config.maxFrames = static_cast<unsigned long long>(std::stoull(argv[++i]));
+            } catch (...) {
+                (void)logPrintf(0, kGeneral, "Invalid value for --frames");
+                return 2;
+            }
+            continue;
+        }
+        if (arg == "--diag-interval" && (i + 1) < argc) {
+            try {
+                config.diagnosticsIntervalSeconds = std::stod(argv[++i]);
+            } catch (...) {
+                (void)logPrintf(0, kGeneral, "Invalid value for --diag-interval");
+                return 2;
+            }
+            continue;
+        }
+    }
+
+    marble::core::Engine engine(config);
+    if (!engine.init()) {
+        (void)logPrintf(0, kGeneral, "Failed to initialize engine");
         return 1;
     }
 
-    while (!window->shouldClose()) {
-        window->pollEvents();
-    }
+    const int exitCode = engine.run();
+    engine.shutdown();
 
-    std::cout << "Window closed.\n";
-    return 0;
+    (void)logPrintf(0, kGeneral, "Engine stopped.");
+    return exitCode;
 }

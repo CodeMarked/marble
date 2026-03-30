@@ -15,7 +15,14 @@ add_library(engine STATIC)
 
 target_sources(engine
 PRIVATE
+    core/AssetRoot.cpp
     core/Engine.cpp
+    core/Log.cpp
+    core/Parallelism.cpp
+    core/Simulation.cpp
+    platform/hardware/System.cpp
+    platform/os/ProcessId.cpp
+    platform/paths/ExecutableDir.cpp
     platform/window/Window.cpp
 )
 
@@ -28,6 +35,7 @@ find_package(Vulkan REQUIRED)
 
 target_link_libraries(engine
 PUBLIC
+    marble_compile_options
     Vulkan::Vulkan
 PRIVATE
     glfw

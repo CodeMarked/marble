@@ -1,13 +1,11 @@
-name: Build
+name: Build and Test
 
 on:
   push:
   pull_request:
 
 jobs:
-
-  build:
-
+  build-and-test:
     runs-on: windows-latest
 
     steps:
@@ -23,10 +21,24 @@ jobs:
         .\vcpkg\bootstrap-vcpkg.bat
         .\vcpkg\vcpkg install vulkan-headers vulkan-loader:x64-windows
 
-    - name: Configure
+    - name: Configure (Debug)
       run: |
         $tc = Join-Path $env:GITHUB_WORKSPACE "vcpkg\scripts\buildsystems\vcpkg.cmake"
-        cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE="$tc"
+        cmake --preset debug -DCMAKE_TOOLCHAIN_FILE="$tc"
 
-    - name: Build
-      run: cmake --build build
+    - name: Build (Debug)
+      run: cmake --build --preset build-debug
+
+    - name: Test (Debug)
+      run: ctest --preset test-debug
+
+    - name: Configure (Release)
+      run: |
+        $tc = Join-Path $env:GITHUB_WORKSPACE "vcpkg\scripts\buildsystems\vcpkg.cmake"
+        cmake --preset release -DCMAKE_TOOLCHAIN_FILE="$tc"
+
+    - name: Build (Release)
+      run: cmake --build --preset build-release
+
+    - name: Test (Release)
+      run: ctest --preset test-release
