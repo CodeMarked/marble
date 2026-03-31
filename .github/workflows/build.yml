@@ -10,16 +10,26 @@ jobs:
 
     steps:
 
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
 
     - name: Setup CMake
       uses: lukka/get-cmake@latest
 
-    - name: Setup vcpkg and install Vulkan
+    - name: Setup vcpkg and install Vulkan + glslc
       run: |
         git clone https://github.com/microsoft/vcpkg.git --depth 1
         .\vcpkg\bootstrap-vcpkg.bat
-        .\vcpkg\vcpkg install vulkan-headers vulkan-loader:x64-windows
+        .\vcpkg\vcpkg install vulkan-headers vulkan-loader shaderc:x64-windows
+
+    - name: Add glslc to PATH
+      shell: pwsh
+      run: |
+        $glslcDir = Join-Path $env:GITHUB_WORKSPACE 'vcpkg\installed\x64-windows\tools\shaderc'
+        if (-not (Test-Path (Join-Path $glslcDir 'glslc.exe'))) {
+          Write-Error "glslc.exe not found under $glslcDir"
+          exit 1
+        }
+        Add-Content -Path $env:GITHUB_PATH -Value $glslcDir
 
     - name: Configure (Debug)
       run: |
