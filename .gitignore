@@ -9,3 +9,6 @@ marble/
 *.sln
 *.vcxproj*
 compile_commands.json
+
+# Optional documentation / notes alongside the tree
+docs/

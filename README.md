@@ -24,7 +24,7 @@ Outputs go under `build\vs-debug\` and `build\vs-release\` (multi-config Visual 
 
 ### Compiler policy (Marble targets)
 
-Engine, game, and tests inherit shared flags from [`cmake/MarbleCompileOptions.cmake`](cmake/MarbleCompileOptions.cmake): MSVC uses `/W4` and `/permissive-`; other toolchains use `-Wall -Wextra -Wpedantic`. **Debug** defines `MARBLE_DEBUG=1` for conditional compilation. Third-party deps (for example GLFW) are not forced to match. Details: [`docs/decisions/ADR-0006-toolchain-compile-policy.md`](docs/decisions/ADR-0006-toolchain-compile-policy.md).
+Engine, game, and tests inherit shared flags from [`cmake/MarbleCompileOptions.cmake`](cmake/MarbleCompileOptions.cmake): MSVC uses `/W4` and `/permissive-`; other toolchains use `-Wall -Wextra -Wpedantic`. **Debug** defines `MARBLE_DEBUG=1` for conditional compilation. Third-party deps (for example GLFW) are not forced to match.
 
 ## Run
 
@@ -59,7 +59,7 @@ ctest --preset test-debug
 ctest --preset test-release
 ```
 
-CTest runs these targets (see [`docs/runbooks/testing.md`](docs/runbooks/testing.md) for intent):
+CTest runs these targets:
 
 | Test | What it checks |
 | --- | --- |
