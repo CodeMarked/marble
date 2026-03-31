@@ -7,8 +7,20 @@
 
 namespace marble::platform {
 
+namespace {
+
+void framebufferResizeThunk(GLFWwindow* gw, int /*width*/, int /*height*/) {
+    auto* self = static_cast<Window*>(glfwGetWindowUserPointer(gw));
+    if (self) {
+        self->markFramebufferResized();
+    }
+}
+
+} // namespace
+
 struct Window::Impl {
     GLFWwindow* window = nullptr;
+    bool framebufferResized = false;
 };
 
 namespace {
@@ -47,7 +59,10 @@ std::unique_ptr<Window> Window::create(const std::string& title, int width, int 
 
     auto impl = std::make_unique<Impl>();
     impl->window = raw;
-    return std::unique_ptr<Window>(new Window(std::move(impl)));
+    auto* win = new Window(std::move(impl));
+    glfwSetWindowUserPointer(raw, win);
+    glfwSetFramebufferSizeCallback(raw, framebufferResizeThunk);
+    return std::unique_ptr<Window>(win);
 }
 
 Window::Window(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
@@ -88,6 +103,73 @@ void Window::getFramebufferSize(int* outWidth, int* outHeight) const {
         return;
     }
     glfwGetFramebufferSize(impl_->window, outWidth, outHeight);
+}
+
+bool Window::consumeFramebufferResized() {
+    if (!impl_) {
+        return false;
+    }
+    const bool v = impl_->framebufferResized;
+    impl_->framebufferResized = false;
+    return v;
+}
+
+bool Window::isKeyDown(Key key) const {
+    if (!impl_ || !impl_->window) {
+        return false;
+    }
+    int glfwKey = GLFW_KEY_UNKNOWN;
+    switch (key) {
+    case Key::W:
+        glfwKey = GLFW_KEY_W;
+        break;
+    case Key::A:
+        glfwKey = GLFW_KEY_A;
+        break;
+    case Key::S:
+        glfwKey = GLFW_KEY_S;
+        break;
+    case Key::D:
+        glfwKey = GLFW_KEY_D;
+        break;
+    case Key::Left:
+        glfwKey = GLFW_KEY_LEFT;
+        break;
+    case Key::Right:
+        glfwKey = GLFW_KEY_RIGHT;
+        break;
+    case Key::Up:
+        glfwKey = GLFW_KEY_UP;
+        break;
+    case Key::Down:
+        glfwKey = GLFW_KEY_DOWN;
+        break;
+    case Key::Space:
+        glfwKey = GLFW_KEY_SPACE;
+        break;
+    case Key::Escape:
+        glfwKey = GLFW_KEY_ESCAPE;
+        break;
+    }
+    return glfwGetKey(impl_->window, glfwKey) == GLFW_PRESS;
+}
+
+void Window::setTitle(const std::string& title) {
+    if (impl_ && impl_->window) {
+        glfwSetWindowTitle(impl_->window, title.c_str());
+    }
+}
+
+void Window::requestClose() {
+    if (impl_ && impl_->window) {
+        glfwSetWindowShouldClose(impl_->window, GLFW_TRUE);
+    }
+}
+
+void Window::markFramebufferResized() {
+    if (impl_) {
+        impl_->framebufferResized = true;
+    }
 }
 
 bool Window::createVulkanSurface(VkInstance instance, VkSurfaceKHR* outSurface) const {

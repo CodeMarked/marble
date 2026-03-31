@@ -43,7 +43,9 @@ try {
     }
 
     if ($RunHeadlessSmoke) {
-        $exe = Join-Path $ProjectRoot "build\vs-$ConfigurePreset\game\Debug\marbles.exe"
+        # Match Visual Studio multi-config output (see CMakePresets.json build-debug / build-release).
+        $smokeConfig = if ($BuildPreset -match '(?i)release') { 'Release' } else { 'Debug' }
+        $exe = Join-Path $ProjectRoot "build\vs-$ConfigurePreset\game\$smokeConfig\marbles.exe"
         if (-not (Test-Path $exe)) {
             throw "Smoke executable not found at $exe"
         }

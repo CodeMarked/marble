@@ -103,7 +103,7 @@ int Engine::run() {
         const double dtSeconds = dtEstimator.next(measuredDtSeconds);
         runFrame(dtSeconds);
 
-        if (config_.maxFrames > 0 && frameCount_ >= config_.maxFrames) {
+        if (config_.maxFrames > 0 && frameIndex_ >= config_.maxFrames) {
             closeRequested_ = true;
         }
     }
@@ -117,9 +117,9 @@ void Engine::shutdown() {
     }
 
     (void)logPrintf(0, kEngineLog, "Engine shutdown: releasing runtime state");
-    window_.reset();
     simulationPhase_.reset();
     renderPhase_.reset();
+    window_.reset();
     assetsRootResolved_.clear();
     closeRequested_ = false;
     initialized_ = false;
@@ -140,6 +140,22 @@ void Engine::setRenderPhase(std::unique_ptr<IRenderPhase> renderPhase) {
 
 const std::string& Engine::assetsRootPath() const {
     return assetsRootResolved_;
+}
+
+platform::Window* Engine::window() {
+    return window_.get();
+}
+
+void Engine::requestClose() {
+    if (window_) {
+        window_->requestClose();
+    }
+    closeRequested_ = true;
+}
+
+void Engine::resetPhasesToDefaults() {
+    simulationPhase_ = std::make_unique<FixedStepSimulationPhase>();
+    renderPhase_ = std::make_unique<NoopRenderPhase>();
 }
 
 void Engine::runFrame(double dtSeconds) {

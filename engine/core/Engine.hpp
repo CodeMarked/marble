@@ -65,6 +65,15 @@ public:
     /// Empty when asset root resolution is disabled or no directory was found.
     const std::string& assetsRootPath() const;
 
+    /// Non-owning pointer to the live window, or nullptr in headless mode or before `init()`.
+    platform::Window* window();
+
+    /// Stop `run()` after the current frame (ignored in headless mode without a window).
+    void requestClose();
+
+    /// Replace injected phases with the same defaults `init()` would use (noop render, fixed-step sim).
+    void resetPhasesToDefaults();
+
 private:
     void runFrame(double dtSeconds);
     void runDiagnostics(double dtSeconds);

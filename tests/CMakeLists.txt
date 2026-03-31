@@ -14,6 +14,20 @@ add_test(
     COMMAND engine_smoke_test
 )
 
+add_executable(engine_reset_phases_test
+    engine_reset_phases_test.cpp
+)
+
+target_link_libraries(engine_reset_phases_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME engine_reset_phases_test
+    COMMAND engine_reset_phases_test
+)
+
 add_executable(fixed_step_simulation_test
     fixed_step_simulation_test.cpp
 )

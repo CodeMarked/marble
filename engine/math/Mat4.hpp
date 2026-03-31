@@ -62,6 +62,34 @@ struct Mat4 {
         r.m[15] = 1.f;
         return r;
     }
+
+    /// Rotation about **+X**: positive angle moves **+Y** toward **+Z** (left-handed).
+    [[nodiscard]] static inline Mat4 rotationX(float radians) noexcept {
+        const float c = std::cos(radians);
+        const float s = std::sin(radians);
+        Mat4 r{};
+        r.m[0] = 1.f;
+        r.m[5] = c;
+        r.m[6] = s;
+        r.m[9] = -s;
+        r.m[10] = c;
+        r.m[15] = 1.f;
+        return r;
+    }
+
+    /// Rotation about **+Z**: positive angle moves **+X** toward **+Y** (left-handed).
+    [[nodiscard]] static inline Mat4 rotationZ(float radians) noexcept {
+        const float c = std::cos(radians);
+        const float s = std::sin(radians);
+        Mat4 r{};
+        r.m[0] = c;
+        r.m[1] = s;
+        r.m[4] = -s;
+        r.m[5] = c;
+        r.m[10] = 1.f;
+        r.m[15] = 1.f;
+        return r;
+    }
 };
 
 [[nodiscard]] constexpr float mat4Elem(Mat4 const& a, std::size_t row, std::size_t col) noexcept {

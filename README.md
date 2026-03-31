@@ -1,6 +1,6 @@
 # Marble
 
-C++20 game engine with Vulkan and ECS.
+C++20 game project with a **Vulkan** rendering path and a small **runtime engine** (windowing, frame phases, logging, asset-root resolution). Much of what lives under `engine/` is **architecture and policy**—headers and tests that describe future systems (physics, audio, animation, networking, and similar)—and is **not** all wired into the shipped `marbles` demo yet.
 
 ## Build (recommended: CMake presets)
 
@@ -41,6 +41,12 @@ Adjust diagnostics print cadence (seconds), or disable diagnostics entirely (`<=
 
 ```powershell
 build\vs-debug\game\Debug\marbles.exe --headless --frames 120 --diag-interval 0.5
+```
+
+On a machine with multiple Vulkan adapters, you can select the **n**th suitable device after the usual sorting (discrete GPUs are preferred before integrated):
+
+```powershell
+build\vs-debug\game\Debug\marbles.exe --gpu 0
 ```
 
 ## Test

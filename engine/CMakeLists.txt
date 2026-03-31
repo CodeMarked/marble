@@ -24,6 +24,7 @@ PRIVATE
     platform/os/ProcessId.cpp
     platform/paths/ExecutableDir.cpp
     platform/window/Window.cpp
+    render/vulkan/VulkanRhi.cpp
 )
 
 target_include_directories(engine
