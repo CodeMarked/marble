@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 
 namespace marble::input {
 
@@ -105,11 +106,37 @@ private:
     std::array<std::optional<ActionBinding>, toIndex(AbstractControl::Count)> bindings_{};
 };
 
+/// One row applied by `ActionPolicy::applyActionContext` (ownership + disabled together).
+struct ActionContextEntry {
+    LogicalActionId action{kInvalidAction};
+    std::uint32_t ownerMask{0u};
+    bool disabled{false};
+};
+
 /// Context/ownership and action-disable policy applied at logical-action layer.
 template <std::size_t MaxActions = 256>
 class ActionPolicy {
 public:
     static_assert(MaxActions > 0, "MaxActions must be > 0");
+
+    /// Clear owner masks and disabled flags for all actions (shared access, all enabled).
+    void resetActionGates() noexcept {
+        ownerMasks_.fill(0u);
+        for (auto& v : disabled_) {
+            v = false;
+        }
+    }
+
+    /// Apply context rows; each listed action gets the given owner mask and disabled state.
+    void applyActionContext(std::span<ActionContextEntry const> entries) noexcept {
+        for (ActionContextEntry const& e : entries) {
+            if (e.action >= MaxActions) {
+                continue;
+            }
+            ownerMasks_[e.action] = e.ownerMask;
+            disabled_[e.action] = e.disabled;
+        }
+    }
 
     void setOwnerMask(LogicalActionId action, std::uint32_t ownerMask) noexcept {
         if (action >= MaxActions) {
