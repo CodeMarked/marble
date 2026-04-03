@@ -1,5 +1,7 @@
 #include "render/vulkan/VulkanRhi.hpp"
 
+#include "render/DrawFlags.hpp"
+#include "math/Mat4.hpp"
 #include "platform/window/Window.hpp"
 
 #define GLFW_INCLUDE_VULKAN
@@ -8,7 +10,9 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -16,6 +20,7 @@
 #include <limits>
 #include <optional>
 #include <set>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -177,11 +182,8 @@ struct SwapchainSupportDetails {
 }
 
 [[nodiscard]] VkPresentModeKHR choosePresentMode(std::vector<VkPresentModeKHR> const& modes) {
-    for (auto m : modes) {
-        if (m == VK_PRESENT_MODE_MAILBOX_KHR) {
-            return m;
-        }
-    }
+    (void)modes;
+    // FIFO is strictly ordered (vsync). MAILBOX + marginal sync bugs has produced "clear only" frames on some drivers.
     return VK_PRESENT_MODE_FIFO_KHR;
 }
 
@@ -215,7 +217,9 @@ struct SwapchainSupportDetails {
 struct PushConstants {
     float model[16];
     float color[4];
+    std::uint32_t drawFlags{};
 };
+static_assert(sizeof(PushConstants) == 84u, "PushConstants must match mesh.{vert,frag} std430 offsets (80+4)");
 
 struct GpuMesh {
     VkBuffer vertexBuffer = VK_NULL_HANDLE;
@@ -241,6 +245,8 @@ struct VulkanRhiImpl {
     VkRenderPass renderPass = VK_NULL_HANDLE;
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
     VkPipeline graphicsPipeline = VK_NULL_HANDLE;
+    VkPipeline overlayPipeline = VK_NULL_HANDLE;
+    std::uint32_t fullscreenQuadMesh = std::numeric_limits<std::uint32_t>::max();
     std::vector<VkFramebuffer> framebuffers;
     VkCommandPool commandPool = VK_NULL_HANDLE;
     std::vector<VkCommandBuffer> commandBuffers;
@@ -279,6 +285,25 @@ struct VulkanRhiImpl {
 
     static constexpr int kMaxFramesInFlight = 2;
 };
+
+[[nodiscard]] bool copyValidatedSpirvToImpl(
+    VulkanRhiImpl& d,
+    std::span<std::uint8_t const> vertBytes,
+    std::span<std::uint8_t const> fragBytes
+) noexcept {
+    constexpr std::size_t kMaxBytes = static_cast<std::size_t>(16) * 1024 * 1024;
+    if (vertBytes.empty() || fragBytes.empty() || vertBytes.size() % 4 != 0 || fragBytes.size() % 4 != 0) {
+        return false;
+    }
+    if (vertBytes.size() > kMaxBytes || fragBytes.size() > kMaxBytes) {
+        return false;
+    }
+    d.vertShaderCode.resize(vertBytes.size() / 4);
+    d.fragShaderCode.resize(fragBytes.size() / 4);
+    std::memcpy(d.vertShaderCode.data(), vertBytes.data(), vertBytes.size());
+    std::memcpy(d.fragShaderCode.data(), fragBytes.data(), fragBytes.size());
+    return true;
+}
 
 void destroySwapchainOnly(VulkanRhiImpl& d) {
     if (d.device == VK_NULL_HANDLE) {
@@ -478,6 +503,32 @@ void copyBuffer(VulkanRhiImpl& impl, VkBuffer src, VkBuffer dst, VkDeviceSize si
 
 bool createSwapchainFull(VulkanRhiImpl& impl, platform::Window& window);
 
+[[nodiscard]] bool recreateRenderFinishedSemaphores(VulkanRhiImpl& impl, std::uint32_t swapchainImageCount) {
+    for (VkSemaphore s : impl.renderFinishedSemaphores) {
+        if (s != VK_NULL_HANDLE) {
+            vkDestroySemaphore(impl.device, s, nullptr);
+        }
+    }
+    impl.renderFinishedSemaphores.clear();
+    if (swapchainImageCount == 0) {
+        return false;
+    }
+    impl.renderFinishedSemaphores.resize(swapchainImageCount);
+    VkSemaphoreCreateInfo sci{};
+    sci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    for (std::uint32_t i = 0; i < swapchainImageCount; ++i) {
+        if (vkCreateSemaphore(impl.device, &sci, nullptr, &impl.renderFinishedSemaphores[i]) != VK_SUCCESS) {
+            for (std::uint32_t j = 0; j < i; ++j) {
+                vkDestroySemaphore(impl.device, impl.renderFinishedSemaphores[j], nullptr);
+                impl.renderFinishedSemaphores[j] = VK_NULL_HANDLE;
+            }
+            impl.renderFinishedSemaphores.clear();
+            return false;
+        }
+    }
+    return true;
+}
+
 bool recreateSwapchain(VulkanRhiImpl& impl, platform::Window& window) {
     int w = 0, h = 0;
     window.getFramebufferSize(&w, &h);
@@ -487,6 +538,10 @@ bool recreateSwapchain(VulkanRhiImpl& impl, platform::Window& window) {
     }
     vkDeviceWaitIdle(impl.device);
     destroySwapchainOnly(impl);
+    if (impl.overlayPipeline) {
+        vkDestroyPipeline(impl.device, impl.overlayPipeline, nullptr);
+        impl.overlayPipeline = VK_NULL_HANDLE;
+    }
     if (impl.graphicsPipeline) {
         vkDestroyPipeline(impl.device, impl.graphicsPipeline, nullptr);
         impl.graphicsPipeline = VK_NULL_HANDLE;
@@ -619,6 +674,9 @@ bool createSwapchainFull(VulkanRhiImpl& impl, platform::Window& window) {
         return false;
     }
     impl.imagesInFlight.assign(n, VK_NULL_HANDLE);
+    if (!recreateRenderFinishedSemaphores(impl, n)) {
+        return false;
+    }
     return true;
 }
 
@@ -691,7 +749,8 @@ bool createRenderPassAndPipeline(VulkanRhiImpl& impl) {
     }
 
     VkPushConstantRange pcr{};
-    pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    // Mesh shaders read push data only in the vertex stage; fragment uses flat varyings (see mesh.vert / mesh.frag).
+    pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
     pcr.offset = 0;
     pcr.size = sizeof(PushConstants);
 
@@ -779,27 +838,58 @@ bool createRenderPassAndPipeline(VulkanRhiImpl& impl) {
     rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
     rs.polygonMode = VK_POLYGON_MODE_FILL;
     rs.lineWidth = 1.f;
-    rs.cullMode = VK_CULL_MODE_BACK_BIT;
-    // Dynamic viewport uses negative height (Vulkan NDC Y flip); that reverses winding vs asset meshes.
+    // Procedural garden meshes (discs, cylinders, subdivided icosa) mix winding with the dynamic
+    // viewport Y-flip; back-face cull was culling outward faces and exposing “interiors”. Draw both
+    // sides — depth test keeps outside views correct for closed solids at modest overdraw cost.
+    rs.cullMode = VK_CULL_MODE_NONE;
     rs.frontFace = VK_FRONT_FACE_CLOCKWISE;
 
     VkPipelineMultisampleStateCreateInfo ms{};
     ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
     ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
-    VkPipelineDepthStencilStateCreateInfo ds{};
-    ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-    ds.depthTestEnable = VK_TRUE;
-    ds.depthWriteEnable = VK_TRUE;
-    ds.depthCompareOp = VK_COMPARE_OP_LESS;
+    VkPipelineDepthStencilStateCreateInfo dsMain{};
+    dsMain.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    // UI and clip-space draws use z=0..1 in NDC; some stacks were easier to validate with depth off for the main pass.
+    // Garden/Marbles rely on draw order for overlapping meshes; revisit split UI/world pipelines if precision is needed.
+    dsMain.depthTestEnable = VK_FALSE;
+    dsMain.depthWriteEnable = VK_FALSE;
+    dsMain.depthCompareOp = VK_COMPARE_OP_LESS;
 
-    VkPipelineColorBlendAttachmentState cba{};
-    cba.colorWriteMask =
+    VkPipelineDepthStencilStateCreateInfo dsOverlay{};
+    dsOverlay.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    dsOverlay.depthTestEnable = VK_TRUE;
+    dsOverlay.depthWriteEnable = VK_FALSE;
+    dsOverlay.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+
+    VkPipelineColorBlendAttachmentState cbaMain{};
+    cbaMain.blendEnable = VK_TRUE;
+    cbaMain.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    cbaMain.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    cbaMain.colorBlendOp = VK_BLEND_OP_ADD;
+    cbaMain.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    cbaMain.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    cbaMain.alphaBlendOp = VK_BLEND_OP_ADD;
+    cbaMain.colorWriteMask =
         VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-    VkPipelineColorBlendStateCreateInfo cb{};
-    cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    cb.attachmentCount = 1;
-    cb.pAttachments = &cba;
+    VkPipelineColorBlendAttachmentState cbaOverlay{};
+    cbaOverlay.blendEnable = VK_TRUE;
+    cbaOverlay.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    cbaOverlay.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    cbaOverlay.colorBlendOp = VK_BLEND_OP_ADD;
+    cbaOverlay.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    cbaOverlay.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    cbaOverlay.alphaBlendOp = VK_BLEND_OP_ADD;
+    cbaOverlay.colorWriteMask =
+        VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendStateCreateInfo cbMain{};
+    cbMain.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    cbMain.attachmentCount = 1;
+    cbMain.pAttachments = &cbaMain;
+    VkPipelineColorBlendStateCreateInfo cbOverlay{};
+    cbOverlay.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    cbOverlay.attachmentCount = 1;
+    cbOverlay.pAttachments = &cbaOverlay;
 
     std::array<VkDynamicState, 2> dyn = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
     VkPipelineDynamicStateCreateInfo dy{};
@@ -816,8 +906,8 @@ bool createRenderPassAndPipeline(VulkanRhiImpl& impl) {
     gpi.pViewportState = &vps;
     gpi.pRasterizationState = &rs;
     gpi.pMultisampleState = &ms;
-    gpi.pDepthStencilState = &ds;
-    gpi.pColorBlendState = &cb;
+    gpi.pDepthStencilState = &dsMain;
+    gpi.pColorBlendState = &cbMain;
     gpi.pDynamicState = &dy;
     gpi.layout = impl.pipelineLayout;
     gpi.renderPass = impl.renderPass;
@@ -828,8 +918,253 @@ bool createRenderPassAndPipeline(VulkanRhiImpl& impl) {
         vkDestroyShaderModule(impl.device, frag, nullptr);
         return false;
     }
+
+    VkPipelineRasterizationStateCreateInfo rsOverlay = rs;
+    rsOverlay.cullMode = VK_CULL_MODE_NONE;
+    gpi.pRasterizationState = &rsOverlay;
+    gpi.pDepthStencilState = &dsOverlay;
+    gpi.pColorBlendState = &cbOverlay;
+    if (vkCreateGraphicsPipelines(impl.device, VK_NULL_HANDLE, 1, &gpi, nullptr, &impl.overlayPipeline) != VK_SUCCESS) {
+        vkDestroyPipeline(impl.device, impl.graphicsPipeline, nullptr);
+        impl.graphicsPipeline = VK_NULL_HANDLE;
+        vkDestroyShaderModule(impl.device, vert, nullptr);
+        vkDestroyShaderModule(impl.device, frag, nullptr);
+        return false;
+    }
+
     vkDestroyShaderModule(impl.device, vert, nullptr);
     vkDestroyShaderModule(impl.device, frag, nullptr);
+    return true;
+}
+
+[[nodiscard]] bool completeVulkanInitAfterSpirv(
+    VulkanRhiImpl& d,
+    platform::Window& window,
+    char const* appName,
+    std::optional<std::uint32_t> physicalDeviceIndex
+) {
+    std::uint32_t glfwCount = 0;
+    char const* const* glfwExt = glfwGetRequiredInstanceExtensions(&glfwCount);
+    std::vector<char const*> extensions(glfwExt, glfwExt + glfwCount);
+#if MARBLE_VK_ENABLE_VALIDATION
+    char const* const debugExt = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+    extensions.push_back(debugExt);
+#endif
+
+#if MARBLE_VK_ENABLE_VALIDATION
+    char const* layers[] = {"VK_LAYER_KHRONOS_validation"};
+#endif
+
+    VkApplicationInfo ai{};
+    ai.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    ai.pApplicationName = appName;
+    ai.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
+    ai.pEngineName = "Marble";
+    ai.engineVersion = VK_MAKE_VERSION(1, 0, 0);
+    ai.apiVersion = VK_API_VERSION_1_2;
+
+    VkInstanceCreateInfo ici{};
+    ici.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    ici.pApplicationInfo = &ai;
+    ici.enabledExtensionCount = static_cast<std::uint32_t>(extensions.size());
+    ici.ppEnabledExtensionNames = extensions.data();
+#if MARBLE_VK_ENABLE_VALIDATION
+    ici.enabledLayerCount = 1;
+    ici.ppEnabledLayerNames = layers;
+    VkDebugUtilsMessengerCreateInfoEXT debugMessengerCi{};
+    debugMessengerCi.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+    debugMessengerCi.messageSeverity =
+        VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+    debugMessengerCi.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+        VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+    debugMessengerCi.pfnUserCallback = debugCallback;
+    ici.pNext = &debugMessengerCi;
+#else
+    ici.enabledLayerCount = 0;
+#endif
+    if (vkCreateInstance(&ici, nullptr, &d.instance) != VK_SUCCESS) {
+        return false;
+    }
+#if MARBLE_VK_ENABLE_VALIDATION
+    (void)createDebugMessenger(d.instance, &d.debugMessenger);
+#endif
+    if (!window.createVulkanSurface(d.instance, &d.surface)) {
+        return false;
+    }
+
+    std::uint32_t devCount = 0;
+    vkEnumeratePhysicalDevices(d.instance, &devCount, nullptr);
+    if (devCount == 0) {
+        return false;
+    }
+    std::vector<VkPhysicalDevice> devices(devCount);
+    vkEnumeratePhysicalDevices(d.instance, &devCount, devices.data());
+    std::vector<SuitablePhysicalDevice> suitable;
+    suitable.reserve(devCount);
+    for (std::uint32_t i = 0; i < devCount; ++i) {
+        VkPhysicalDevice const pd = devices[i];
+        if (!checkDeviceExtensionSupport(pd)) {
+            continue;
+        }
+        QueueFamilyIndices q = findQueueFamilies(pd, d.surface);
+        if (!q.complete()) {
+            continue;
+        }
+        SwapchainSupportDetails sup = querySwapchainSupport(pd, d.surface);
+        if (sup.formats.empty() || sup.presentModes.empty()) {
+            continue;
+        }
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(pd, &props);
+        SuitablePhysicalDevice cand{};
+        cand.device = pd;
+        cand.queues = q;
+        cand.typeRank = deviceTypePreferenceRank(props.deviceType);
+        cand.enumeratedIndex = i;
+        suitable.push_back(cand);
+    }
+    if (suitable.empty()) {
+        return false;
+    }
+    std::stable_sort(suitable.begin(), suitable.end(), [](SuitablePhysicalDevice const& a, SuitablePhysicalDevice const& b) {
+        if (a.typeRank != b.typeRank) {
+            return a.typeRank < b.typeRank;
+        }
+        return a.enumeratedIndex < b.enumeratedIndex;
+    });
+
+    std::size_t pick = 0;
+    if (physicalDeviceIndex.has_value()) {
+        if (*physicalDeviceIndex >= suitable.size()) {
+            return false;
+        }
+        pick = static_cast<std::size_t>(*physicalDeviceIndex);
+    }
+
+    SuitablePhysicalDevice const& chosen = suitable[pick];
+    d.physicalDevice = chosen.device;
+    d.graphicsFamily = *chosen.queues.graphicsFamily;
+    d.presentFamily = *chosen.queues.presentFamily;
+
+    float const priority = 1.f;
+    std::vector<VkDeviceQueueCreateInfo> qcis;
+    std::set<std::uint32_t> uniq = {d.graphicsFamily, d.presentFamily};
+    for (std::uint32_t qf : uniq) {
+        VkDeviceQueueCreateInfo q{};
+        q.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        q.queueFamilyIndex = qf;
+        q.queueCount = 1;
+        q.pQueuePriorities = &priority;
+        qcis.push_back(q);
+    }
+    char const* devExt[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+    VkDeviceCreateInfo deviceCi{};
+    deviceCi.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    deviceCi.queueCreateInfoCount = static_cast<std::uint32_t>(qcis.size());
+    deviceCi.pQueueCreateInfos = qcis.data();
+    deviceCi.enabledExtensionCount = 1;
+    deviceCi.ppEnabledExtensionNames = devExt;
+    if (vkCreateDevice(d.physicalDevice, &deviceCi, nullptr, &d.device) != VK_SUCCESS) {
+        return false;
+    }
+    vkGetDeviceQueue(d.device, d.graphicsFamily, 0, &d.graphicsQueue);
+    vkGetDeviceQueue(d.device, d.presentFamily, 0, &d.presentQueue);
+
+    VkCommandPoolCreateInfo cpci{};
+    cpci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    cpci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    cpci.queueFamilyIndex = d.graphicsFamily;
+    if (vkCreateCommandPool(d.device, &cpci, nullptr, &d.commandPool) != VK_SUCCESS) {
+        return false;
+    }
+
+    if (!createSwapchainFull(d, window)) {
+        return false;
+    }
+
+    VkDeviceSize uboAlign = sizeof(math::Mat4);
+    VkPhysicalDeviceProperties props;
+    vkGetPhysicalDeviceProperties(d.physicalDevice, &props);
+    VkDeviceSize aligned = uboAlign;
+    if (props.limits.minUniformBufferOffsetAlignment > 0) {
+        VkDeviceSize a = props.limits.minUniformBufferOffsetAlignment;
+        aligned = (sizeof(math::Mat4) + a - 1) / a * a;
+    }
+    VkDeviceSize uboSize = aligned;
+
+    d.uniformBuffers.resize(VulkanRhiImpl::kMaxFramesInFlight);
+    d.uniformBuffersMemory.resize(VulkanRhiImpl::kMaxFramesInFlight);
+    d.uniformMapped.resize(VulkanRhiImpl::kMaxFramesInFlight);
+    for (int i = 0; i < VulkanRhiImpl::kMaxFramesInFlight; ++i) {
+        if (!createBuffer(
+                d,
+                uboSize,
+                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                d.uniformBuffers[i],
+                d.uniformBuffersMemory[i]
+            )) {
+            return false;
+        }
+        if (vkMapMemory(d.device, d.uniformBuffersMemory[i], 0, uboSize, 0, &d.uniformMapped[i]) != VK_SUCCESS) {
+            return false;
+        }
+    }
+
+    std::array<VkDescriptorPoolSize, 1> poolSizes{};
+    poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    poolSizes[0].descriptorCount = static_cast<std::uint32_t>(VulkanRhiImpl::kMaxFramesInFlight);
+    VkDescriptorPoolCreateInfo dpci{};
+    dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    dpci.poolSizeCount = static_cast<std::uint32_t>(poolSizes.size());
+    dpci.pPoolSizes = poolSizes.data();
+    dpci.maxSets = static_cast<std::uint32_t>(VulkanRhiImpl::kMaxFramesInFlight);
+    if (vkCreateDescriptorPool(d.device, &dpci, nullptr, &d.descriptorPool) != VK_SUCCESS) {
+        return false;
+    }
+
+    std::vector<VkDescriptorSetLayout> layouts(VulkanRhiImpl::kMaxFramesInFlight, d.descriptorSetLayout);
+    VkDescriptorSetAllocateInfo dsai{};
+    dsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    dsai.descriptorPool = d.descriptorPool;
+    dsai.descriptorSetCount = static_cast<std::uint32_t>(VulkanRhiImpl::kMaxFramesInFlight);
+    dsai.pSetLayouts = layouts.data();
+    d.descriptorSets.resize(VulkanRhiImpl::kMaxFramesInFlight);
+    if (vkAllocateDescriptorSets(d.device, &dsai, d.descriptorSets.data()) != VK_SUCCESS) {
+        return false;
+    }
+    for (int i = 0; i < VulkanRhiImpl::kMaxFramesInFlight; ++i) {
+        VkDescriptorBufferInfo bi{};
+        bi.buffer = d.uniformBuffers[i];
+        bi.offset = 0;
+        bi.range = sizeof(math::Mat4);
+        VkWriteDescriptorSet w{};
+        w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w.dstSet = d.descriptorSets[i];
+        w.dstBinding = 0;
+        w.dstArrayElement = 0;
+        w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        w.pBufferInfo = &bi;
+        vkUpdateDescriptorSets(d.device, 1, &w, 0, nullptr);
+    }
+
+    d.imageAvailableSemaphores.resize(VulkanRhiImpl::kMaxFramesInFlight);
+    d.inFlightFences.resize(VulkanRhiImpl::kMaxFramesInFlight);
+    VkSemaphoreCreateInfo sci{};
+    sci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    VkFenceCreateInfo fci{};
+    fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    fci.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+    for (int i = 0; i < VulkanRhiImpl::kMaxFramesInFlight; ++i) {
+        if (vkCreateSemaphore(d.device, &sci, nullptr, &d.imageAvailableSemaphores[i]) != VK_SUCCESS ||
+            vkCreateFence(d.device, &fci, nullptr, &d.inFlightFences[i]) != VK_SUCCESS) {
+            return false;
+        }
+    }
+    // renderFinishedSemaphores: one per swapchain image (see createSwapchainFull); avoids VUID
+    // vkQueueSubmit-pSignalSemaphores-00067 when image count > kMaxFramesInFlight.
+
     return true;
 }
 
@@ -924,6 +1259,10 @@ void VulkanRhi::shutdown() {
         }
         d.commandBuffers.clear();
         destroySwapchainOnly(d);
+        if (d.overlayPipeline) {
+            vkDestroyPipeline(d.device, d.overlayPipeline, nullptr);
+            d.overlayPipeline = VK_NULL_HANDLE;
+        }
         if (d.graphicsPipeline) {
             vkDestroyPipeline(d.device, d.graphicsPipeline, nullptr);
             d.graphicsPipeline = VK_NULL_HANDLE;
@@ -978,250 +1317,40 @@ bool VulkanRhi::init(
 
     std::string const vertPath = d.shaderDirectory + "/mesh.vert.spv";
     std::string const fragPath = d.shaderDirectory + "/mesh.frag.spv";
-    auto vertBytes = readBinaryFile(vertPath);
-    auto fragBytes = readBinaryFile(fragPath);
-    if (vertBytes.empty() || vertBytes.size() % 4 != 0 || fragBytes.empty() || fragBytes.size() % 4 != 0) {
+    auto const vertFile = readBinaryFile(vertPath);
+    auto const fragFile = readBinaryFile(fragPath);
+    std::span<std::uint8_t const> const vertSpan(
+        reinterpret_cast<std::uint8_t const*>(vertFile.data()), vertFile.size());
+    std::span<std::uint8_t const> const fragSpan(
+        reinterpret_cast<std::uint8_t const*>(fragFile.data()), fragFile.size());
+    if (!copyValidatedSpirvToImpl(d, vertSpan, fragSpan)) {
         return false;
     }
-    d.vertShaderCode.resize(vertBytes.size() / 4);
-    d.fragShaderCode.resize(fragBytes.size() / 4);
-    std::memcpy(d.vertShaderCode.data(), vertBytes.data(), vertBytes.size());
-    std::memcpy(d.fragShaderCode.data(), fragBytes.data(), fragBytes.size());
-
-    std::uint32_t glfwCount = 0;
-    char const* const* glfwExt = glfwGetRequiredInstanceExtensions(&glfwCount);
-    std::vector<char const*> extensions(glfwExt, glfwExt + glfwCount);
-#if MARBLE_VK_ENABLE_VALIDATION
-    char const* const debugExt = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
-    extensions.push_back(debugExt);
-#endif
-
-#if MARBLE_VK_ENABLE_VALIDATION
-    char const* layers[] = {"VK_LAYER_KHRONOS_validation"};
-#endif
-
-    VkApplicationInfo ai{};
-    ai.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    ai.pApplicationName = appName;
-    ai.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
-    ai.pEngineName = "Marble";
-    ai.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-    ai.apiVersion = VK_API_VERSION_1_2;
-
-    VkInstanceCreateInfo ici{};
-    ici.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-    ici.pApplicationInfo = &ai;
-    ici.enabledExtensionCount = static_cast<std::uint32_t>(extensions.size());
-    ici.ppEnabledExtensionNames = extensions.data();
-#if MARBLE_VK_ENABLE_VALIDATION
-    ici.enabledLayerCount = 1;
-    ici.ppEnabledLayerNames = layers;
-    VkDebugUtilsMessengerCreateInfoEXT debugMessengerCi{};
-    debugMessengerCi.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
-    debugMessengerCi.messageSeverity =
-        VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
-    debugMessengerCi.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
-        VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
-    debugMessengerCi.pfnUserCallback = debugCallback;
-    ici.pNext = &debugMessengerCi;
-#else
-    ici.enabledLayerCount = 0;
-#endif
-    if (vkCreateInstance(&ici, nullptr, &d.instance) != VK_SUCCESS) {
-        return false;
-    }
-#if MARBLE_VK_ENABLE_VALIDATION
-    (void)createDebugMessenger(d.instance, &d.debugMessenger);
-#endif
-    if (!window.createVulkanSurface(d.instance, &d.surface)) {
+    if (!completeVulkanInitAfterSpirv(d, window, appName, physicalDeviceIndex)) {
         shutdown();
         return false;
     }
+    return true;
+}
 
-    std::uint32_t devCount = 0;
-    vkEnumeratePhysicalDevices(d.instance, &devCount, nullptr);
-    if (devCount == 0) {
+bool VulkanRhi::initFromSpirvBytes(
+    platform::Window& window,
+    char const* appName,
+    std::span<std::uint8_t const> vertSpirv,
+    std::span<std::uint8_t const> fragSpirv,
+    std::optional<std::uint32_t> physicalDeviceIndex
+) {
+    shutdown();
+    impl_ = std::make_unique<VulkanRhiImpl>();
+    VulkanRhiImpl& d = *impl_;
+    d.shaderDirectory.clear();
+    if (!copyValidatedSpirvToImpl(d, vertSpirv, fragSpirv)) {
+        return false;
+    }
+    if (!completeVulkanInitAfterSpirv(d, window, appName, physicalDeviceIndex)) {
         shutdown();
         return false;
     }
-    std::vector<VkPhysicalDevice> devices(devCount);
-    vkEnumeratePhysicalDevices(d.instance, &devCount, devices.data());
-    std::vector<SuitablePhysicalDevice> suitable;
-    suitable.reserve(devCount);
-    for (std::uint32_t i = 0; i < devCount; ++i) {
-        VkPhysicalDevice const pd = devices[i];
-        if (!checkDeviceExtensionSupport(pd)) {
-            continue;
-        }
-        QueueFamilyIndices q = findQueueFamilies(pd, d.surface);
-        if (!q.complete()) {
-            continue;
-        }
-        SwapchainSupportDetails sup = querySwapchainSupport(pd, d.surface);
-        if (sup.formats.empty() || sup.presentModes.empty()) {
-            continue;
-        }
-        VkPhysicalDeviceProperties props{};
-        vkGetPhysicalDeviceProperties(pd, &props);
-        SuitablePhysicalDevice cand{};
-        cand.device = pd;
-        cand.queues = q;
-        cand.typeRank = deviceTypePreferenceRank(props.deviceType);
-        cand.enumeratedIndex = i;
-        suitable.push_back(cand);
-    }
-    if (suitable.empty()) {
-        shutdown();
-        return false;
-    }
-    std::stable_sort(suitable.begin(), suitable.end(), [](SuitablePhysicalDevice const& a, SuitablePhysicalDevice const& b) {
-        if (a.typeRank != b.typeRank) {
-            return a.typeRank < b.typeRank;
-        }
-        return a.enumeratedIndex < b.enumeratedIndex;
-    });
-
-    std::size_t pick = 0;
-    if (physicalDeviceIndex.has_value()) {
-        if (*physicalDeviceIndex >= suitable.size()) {
-            shutdown();
-            return false;
-        }
-        pick = static_cast<std::size_t>(*physicalDeviceIndex);
-    }
-
-    SuitablePhysicalDevice const& chosen = suitable[pick];
-    d.physicalDevice = chosen.device;
-    d.graphicsFamily = *chosen.queues.graphicsFamily;
-    d.presentFamily = *chosen.queues.presentFamily;
-
-    float const priority = 1.f;
-    std::vector<VkDeviceQueueCreateInfo> qcis;
-    std::set<std::uint32_t> uniq = {d.graphicsFamily, d.presentFamily};
-    for (std::uint32_t qf : uniq) {
-        VkDeviceQueueCreateInfo q{};
-        q.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-        q.queueFamilyIndex = qf;
-        q.queueCount = 1;
-        q.pQueuePriorities = &priority;
-        qcis.push_back(q);
-    }
-    char const* devExt[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
-    VkDeviceCreateInfo deviceCi{};
-    deviceCi.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    deviceCi.queueCreateInfoCount = static_cast<std::uint32_t>(qcis.size());
-    deviceCi.pQueueCreateInfos = qcis.data();
-    deviceCi.enabledExtensionCount = 1;
-    deviceCi.ppEnabledExtensionNames = devExt;
-    if (vkCreateDevice(d.physicalDevice, &deviceCi, nullptr, &d.device) != VK_SUCCESS) {
-        shutdown();
-        return false;
-    }
-    vkGetDeviceQueue(d.device, d.graphicsFamily, 0, &d.graphicsQueue);
-    vkGetDeviceQueue(d.device, d.presentFamily, 0, &d.presentQueue);
-
-    VkCommandPoolCreateInfo cpci{};
-    cpci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    cpci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-    cpci.queueFamilyIndex = d.graphicsFamily;
-    if (vkCreateCommandPool(d.device, &cpci, nullptr, &d.commandPool) != VK_SUCCESS) {
-        shutdown();
-        return false;
-    }
-
-    if (!createSwapchainFull(d, window)) {
-        shutdown();
-        return false;
-    }
-
-    VkDeviceSize uboAlign = sizeof(math::Mat4);
-    VkPhysicalDeviceProperties props;
-    vkGetPhysicalDeviceProperties(d.physicalDevice, &props);
-    VkDeviceSize aligned = uboAlign;
-    if (props.limits.minUniformBufferOffsetAlignment > 0) {
-        VkDeviceSize a = props.limits.minUniformBufferOffsetAlignment;
-        aligned = (sizeof(math::Mat4) + a - 1) / a * a;
-    }
-    VkDeviceSize uboSize = aligned;
-
-    d.uniformBuffers.resize(VulkanRhiImpl::kMaxFramesInFlight);
-    d.uniformBuffersMemory.resize(VulkanRhiImpl::kMaxFramesInFlight);
-    d.uniformMapped.resize(VulkanRhiImpl::kMaxFramesInFlight);
-    for (int i = 0; i < VulkanRhiImpl::kMaxFramesInFlight; ++i) {
-        if (!createBuffer(
-                d,
-                uboSize,
-                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                d.uniformBuffers[i],
-                d.uniformBuffersMemory[i]
-            )) {
-            shutdown();
-            return false;
-        }
-        if (vkMapMemory(d.device, d.uniformBuffersMemory[i], 0, uboSize, 0, &d.uniformMapped[i]) != VK_SUCCESS) {
-            shutdown();
-            return false;
-        }
-    }
-
-    std::array<VkDescriptorPoolSize, 1> poolSizes{};
-    poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    poolSizes[0].descriptorCount = static_cast<std::uint32_t>(VulkanRhiImpl::kMaxFramesInFlight);
-    VkDescriptorPoolCreateInfo dpci{};
-    dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    dpci.poolSizeCount = static_cast<std::uint32_t>(poolSizes.size());
-    dpci.pPoolSizes = poolSizes.data();
-    dpci.maxSets = static_cast<std::uint32_t>(VulkanRhiImpl::kMaxFramesInFlight);
-    if (vkCreateDescriptorPool(d.device, &dpci, nullptr, &d.descriptorPool) != VK_SUCCESS) {
-        shutdown();
-        return false;
-    }
-
-    std::vector<VkDescriptorSetLayout> layouts(VulkanRhiImpl::kMaxFramesInFlight, d.descriptorSetLayout);
-    VkDescriptorSetAllocateInfo dsai{};
-    dsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    dsai.descriptorPool = d.descriptorPool;
-    dsai.descriptorSetCount = static_cast<std::uint32_t>(VulkanRhiImpl::kMaxFramesInFlight);
-    dsai.pSetLayouts = layouts.data();
-    d.descriptorSets.resize(VulkanRhiImpl::kMaxFramesInFlight);
-    if (vkAllocateDescriptorSets(d.device, &dsai, d.descriptorSets.data()) != VK_SUCCESS) {
-        shutdown();
-        return false;
-    }
-    for (int i = 0; i < VulkanRhiImpl::kMaxFramesInFlight; ++i) {
-        VkDescriptorBufferInfo bi{};
-        bi.buffer = d.uniformBuffers[i];
-        bi.offset = 0;
-        bi.range = sizeof(math::Mat4);
-        VkWriteDescriptorSet w{};
-        w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        w.dstSet = d.descriptorSets[i];
-        w.dstBinding = 0;
-        w.dstArrayElement = 0;
-        w.descriptorCount = 1;
-        w.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        w.pBufferInfo = &bi;
-        vkUpdateDescriptorSets(d.device, 1, &w, 0, nullptr);
-    }
-
-    d.imageAvailableSemaphores.resize(VulkanRhiImpl::kMaxFramesInFlight);
-    d.renderFinishedSemaphores.resize(VulkanRhiImpl::kMaxFramesInFlight);
-    d.inFlightFences.resize(VulkanRhiImpl::kMaxFramesInFlight);
-    VkSemaphoreCreateInfo sci{};
-    sci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-    VkFenceCreateInfo fci{};
-    fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    fci.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-    for (int i = 0; i < VulkanRhiImpl::kMaxFramesInFlight; ++i) {
-        if (vkCreateSemaphore(d.device, &sci, nullptr, &d.imageAvailableSemaphores[i]) != VK_SUCCESS ||
-            vkCreateSemaphore(d.device, &sci, nullptr, &d.renderFinishedSemaphores[i]) != VK_SUCCESS ||
-            vkCreateFence(d.device, &fci, nullptr, &d.inFlightFences[i]) != VK_SUCCESS) {
-            shutdown();
-            return false;
-        }
-    }
-
     return true;
 }
 
@@ -1313,17 +1442,186 @@ std::uint32_t VulkanRhi::uploadMesh(std::span<Vertex const> vertices, std::span<
     return static_cast<std::uint32_t>(d.meshes.size() - 1);
 }
 
-bool VulkanRhi::drawFrame(platform::Window& window, math::Mat4 const& viewProj, std::span<DrawCommand const> draws) {
+bool VulkanRhi::replaceMesh(
+    std::uint32_t meshIndex,
+    std::span<Vertex const> vertices,
+    std::span<std::uint32_t const> indices
+) {
+    if (!impl_ || impl_->device == VK_NULL_HANDLE || vertices.empty() || indices.empty() ||
+        meshIndex >= impl_->meshes.size()) {
+        return false;
+    }
+    VulkanRhiImpl& d = *impl_;
+    vkDeviceWaitIdle(d.device);
+
+    VkDeviceSize vbSize = sizeof(Vertex) * vertices.size();
+    VkDeviceSize ibSize = sizeof(std::uint32_t) * indices.size();
+
+    VkBuffer stagingVb{};
+    VkDeviceMemory stagingVbMem{};
+    VkBuffer stagingIb{};
+    VkDeviceMemory stagingIbMem{};
+    if (!createBuffer(
+            d,
+            vbSize,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            stagingVb,
+            stagingVbMem
+        )) {
+        return false;
+    }
+    void* data = nullptr;
+    vkMapMemory(d.device, stagingVbMem, 0, vbSize, 0, &data);
+    std::memcpy(data, vertices.data(), static_cast<std::size_t>(vbSize));
+    vkUnmapMemory(d.device, stagingVbMem);
+
+    if (!createBuffer(
+            d,
+            ibSize,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            stagingIb,
+            stagingIbMem
+        )) {
+        vkDestroyBuffer(d.device, stagingVb, nullptr);
+        vkFreeMemory(d.device, stagingVbMem, nullptr);
+        return false;
+    }
+    vkMapMemory(d.device, stagingIbMem, 0, ibSize, 0, &data);
+    std::memcpy(data, indices.data(), static_cast<std::size_t>(ibSize));
+    vkUnmapMemory(d.device, stagingIbMem);
+
+    GpuMesh newMesh{};
+    if (!createBuffer(
+            d,
+            vbSize,
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+            newMesh.vertexBuffer,
+            newMesh.vertexMemory
+        )) {
+        vkDestroyBuffer(d.device, stagingVb, nullptr);
+        vkFreeMemory(d.device, stagingVbMem, nullptr);
+        vkDestroyBuffer(d.device, stagingIb, nullptr);
+        vkFreeMemory(d.device, stagingIbMem, nullptr);
+        return false;
+    }
+    if (!createBuffer(
+            d,
+            ibSize,
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+            newMesh.indexBuffer,
+            newMesh.indexMemory
+        )) {
+        vkDestroyBuffer(d.device, newMesh.vertexBuffer, nullptr);
+        vkFreeMemory(d.device, newMesh.vertexMemory, nullptr);
+        vkDestroyBuffer(d.device, stagingVb, nullptr);
+        vkFreeMemory(d.device, stagingVbMem, nullptr);
+        vkDestroyBuffer(d.device, stagingIb, nullptr);
+        vkFreeMemory(d.device, stagingIbMem, nullptr);
+        return false;
+    }
+    copyBuffer(d, stagingVb, newMesh.vertexBuffer, vbSize);
+    copyBuffer(d, stagingIb, newMesh.indexBuffer, ibSize);
+    vkDestroyBuffer(d.device, stagingVb, nullptr);
+    vkFreeMemory(d.device, stagingVbMem, nullptr);
+    vkDestroyBuffer(d.device, stagingIb, nullptr);
+    vkFreeMemory(d.device, stagingIbMem, nullptr);
+
+    newMesh.indexCount = static_cast<std::uint32_t>(indices.size());
+
+    GpuMesh& slot = d.meshes[meshIndex];
+    if (slot.indexBuffer) {
+        vkDestroyBuffer(d.device, slot.indexBuffer, nullptr);
+    }
+    if (slot.vertexBuffer) {
+        vkDestroyBuffer(d.device, slot.vertexBuffer, nullptr);
+    }
+    if (slot.indexMemory) {
+        vkFreeMemory(d.device, slot.indexMemory, nullptr);
+    }
+    if (slot.vertexMemory) {
+        vkFreeMemory(d.device, slot.vertexMemory, nullptr);
+    }
+    slot = newMesh;
+    return true;
+}
+
+void VulkanRhi::ensureFullscreenQuadMesh() {
+    if (!impl_) {
+        return;
+    }
+    VulkanRhiImpl& d = *impl_;
+    if (d.fullscreenQuadMesh != std::numeric_limits<std::uint32_t>::max()) {
+        return;
+    }
+    std::array<Vertex, 4> verts{};
+    verts[0] = Vertex{-1.f, -1.f, 0.f, 0.f, 0.f, 1.f, 1.f, 1.f, 1.f};
+    verts[1] = Vertex{1.f, -1.f, 0.f, 0.f, 0.f, 1.f, 1.f, 1.f, 1.f};
+    verts[2] = Vertex{1.f, 1.f, 0.f, 0.f, 0.f, 1.f, 1.f, 1.f, 1.f};
+    verts[3] = Vertex{-1.f, 1.f, 0.f, 0.f, 0.f, 1.f, 1.f, 1.f, 1.f};
+    std::array<std::uint32_t, 6> const idx = {0, 1, 2, 2, 3, 0};
+    d.fullscreenQuadMesh = uploadMesh(std::span<Vertex const>(verts.data(), verts.size()), idx);
+}
+
+// #region agent log
+static void agentVulkanDbgLog(char const* hypothesisId, char const* location, char const* message, int a, int b, int c, int d) {
+    std::ofstream os(R"(c:\dev\mark\marble\debug-a54c30.log)", std::ios::app);
+    if (!os) {
+        return;
+    }
+    auto const ts = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch())
+                        .count();
+    os << "{\"sessionId\":\"a54c30\",\"hypothesisId\":\"" << hypothesisId << "\",\"location\":\"" << location
+       << "\",\"message\":\"" << message << "\",\"data\":{\"a\":" << a << ",\"b\":" << b << ",\"c\":" << c << ",\"d\":" << d
+       << "},\"timestamp\":" << ts << "}\n";
+}
+// #endregion
+
+bool VulkanRhi::drawFrame(
+    platform::Window& window,
+    math::Mat4 const& viewProj,
+    std::span<MeshDrawInstance const> draws,
+    FrameOverlayTint const* overlayTint
+) {
     if (!impl_ || impl_->device == VK_NULL_HANDLE) {
         return false;
     }
     VulkanRhiImpl& d = *impl_;
+    // #region agent log
+    static unsigned drawFrameLogN = 0;
+    ++drawFrameLogN;
+    bool const agentLogDrawFrame = drawFrameLogN <= 45;
+    if (agentLogDrawFrame) {
+        agentVulkanDbgLog(
+            "H2",
+            "VulkanRhi.cpp:drawFrame",
+            "enter",
+            static_cast<int>(draws.size()),
+            static_cast<int>(d.meshes.size()),
+            static_cast<int>(d.swapExtent.width),
+            static_cast<int>(d.swapExtent.height)
+        );
+    }
+    // #endregion
 
     if (window.consumeFramebufferResized()) {
         if (!recreateSwapchain(d, window)) {
             return false;
         }
     }
+
+    // Serialize the whole device for this frame so acquire → record → submit → present cannot race semaphores/fences.
+    // Replace with leaner sync once the swapchain path is stable on all target GPUs.
+    vkDeviceWaitIdle(d.device);
+    // #region agent log
+    if (agentLogDrawFrame) {
+        agentVulkanDbgLog("H8", "VulkanRhi.cpp:drawFrame", "post_device_idle", static_cast<int>(d.currentFrame), 0, 0, 0);
+    }
+    // #endregion
 
     vkWaitForFences(d.device, 1, &d.inFlightFences[d.currentFrame], VK_TRUE, UINT64_MAX);
 
@@ -1352,6 +1650,20 @@ bool VulkanRhi::drawFrame(platform::Window& window, math::Mat4 const& viewProj, 
     if (acq != VK_SUCCESS && acq != VK_SUBOPTIMAL_KHR) {
         return false;
     }
+
+    // #region agent log
+    if (agentLogDrawFrame) {
+        agentVulkanDbgLog(
+            "H7",
+            "VulkanRhi.cpp:drawFrame",
+            "acq_img",
+            static_cast<int>(imageIndex),
+            static_cast<int>(d.renderFinishedSemaphores.size()),
+            static_cast<int>(d.currentFrame),
+            imageIndex < d.renderFinishedSemaphores.size() ? 1 : 0
+        );
+    }
+    // #endregion
 
     if (d.imagesInFlight[imageIndex] != VK_NULL_HANDLE) {
         vkWaitForFences(d.device, 1, &d.imagesInFlight[imageIndex], VK_TRUE, UINT64_MAX);
@@ -1408,23 +1720,81 @@ bool VulkanRhi::drawFrame(platform::Window& window, math::Mat4 const& viewProj, 
         nullptr
     );
 
-    for (DrawCommand const& dc : draws) {
+    for (MeshDrawInstance const& dc : draws) {
         if (dc.meshIndex >= d.meshes.size()) {
+            // #region agent log
+            if (agentLogDrawFrame) {
+                agentVulkanDbgLog("H2", "VulkanRhi.cpp:drawFrame", "skip_oob", static_cast<int>(dc.meshIndex), static_cast<int>(d.meshes.size()), 0, 0);
+            }
+            // #endregion
             continue;
         }
         GpuMesh const& m = d.meshes[dc.meshIndex];
+        if (m.indexCount == 0 || m.vertexBuffer == VK_NULL_HANDLE || m.indexBuffer == VK_NULL_HANDLE) {
+            // #region agent log
+            if (agentLogDrawFrame) {
+                agentVulkanDbgLog(
+                    "H2",
+                    "VulkanRhi.cpp:drawFrame",
+                    "skip_bad_mesh",
+                    static_cast<int>(dc.meshIndex),
+                    static_cast<int>(m.indexCount),
+                    m.vertexBuffer != VK_NULL_HANDLE ? 1 : 0,
+                    m.indexBuffer != VK_NULL_HANDLE ? 1 : 0
+                );
+            }
+            // #endregion
+            continue;
+        }
+        // #region agent log
+        if (agentLogDrawFrame) {
+            agentVulkanDbgLog(
+                "H2",
+                "VulkanRhi.cpp:drawFrame",
+                "draw_ok",
+                static_cast<int>(dc.meshIndex),
+                static_cast<int>(m.indexCount),
+                static_cast<int>(dc.drawFlags),
+                0
+            );
+        }
+        // #endregion
         PushConstants pc{};
         std::memcpy(pc.model, dc.model.m, sizeof(pc.model));
         pc.color[0] = dc.color.x;
         pc.color[1] = dc.color.y;
         pc.color[2] = dc.color.z;
-        pc.color[3] = 1.f;
-        vkCmdPushConstants(cb, d.pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pc);
+        pc.color[3] = dc.colorAlpha;
+        pc.drawFlags = dc.drawFlags;
+        vkCmdPushConstants(cb, d.pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &pc);
         VkBuffer vb = m.vertexBuffer;
         VkDeviceSize off = 0;
         vkCmdBindVertexBuffers(cb, 0, 1, &vb, &off);
         vkCmdBindIndexBuffer(cb, m.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
         vkCmdDrawIndexed(cb, m.indexCount, 1, 0, 0, 0);
+    }
+
+    if (overlayTint != nullptr && overlayTint->a > 0.f && d.overlayPipeline != VK_NULL_HANDLE) {
+        ensureFullscreenQuadMesh();
+        if (d.fullscreenQuadMesh < d.meshes.size()) {
+            GpuMesh const& qm = d.meshes[d.fullscreenQuadMesh];
+            vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.overlayPipeline);
+            PushConstants opc{};
+            math::Mat4 const id = math::Mat4::identity();
+            std::memcpy(opc.model, id.m, sizeof(opc.model));
+            opc.color[0] = overlayTint->r;
+            opc.color[1] = overlayTint->g;
+            opc.color[2] = overlayTint->b;
+            opc.color[3] = overlayTint->a;
+            opc.drawFlags = marble::render::kPcFlagClipSpace;
+            vkCmdPushConstants(cb, d.pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &opc);
+            VkBuffer vb = qm.vertexBuffer;
+            VkDeviceSize off = 0;
+            vkCmdBindVertexBuffers(cb, 0, 1, &vb, &off);
+            vkCmdBindIndexBuffer(cb, qm.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+            vkCmdDrawIndexed(cb, qm.indexCount, 1, 0, 0, 0);
+            vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.graphicsPipeline);
+        }
     }
 
     vkCmdEndRenderPass(cb);
@@ -1439,7 +1809,7 @@ bool VulkanRhi::drawFrame(platform::Window& window, math::Mat4 const& viewProj, 
     si.commandBufferCount = 1;
     si.pCommandBuffers = &cb;
     si.signalSemaphoreCount = 1;
-    si.pSignalSemaphores = &d.renderFinishedSemaphores[d.currentFrame];
+    si.pSignalSemaphores = &d.renderFinishedSemaphores[imageIndex];
     if (vkQueueSubmit(d.graphicsQueue, 1, &si, d.inFlightFences[d.currentFrame]) != VK_SUCCESS) {
         return false;
     }
@@ -1447,7 +1817,7 @@ bool VulkanRhi::drawFrame(platform::Window& window, math::Mat4 const& viewProj, 
     VkPresentInfoKHR pi{};
     pi.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     pi.waitSemaphoreCount = 1;
-    pi.pWaitSemaphores = &d.renderFinishedSemaphores[d.currentFrame];
+    pi.pWaitSemaphores = &d.renderFinishedSemaphores[imageIndex];
     pi.swapchainCount = 1;
     pi.pSwapchains = &d.swapchain;
     pi.pImageIndices = &imageIndex;
