@@ -150,8 +150,60 @@ bool Window::isKeyDown(Key key) const {
     case Key::Escape:
         glfwKey = GLFW_KEY_ESCAPE;
         break;
+    case Key::Enter:
+        return glfwGetKey(impl_->window, GLFW_KEY_ENTER) == GLFW_PRESS ||
+            glfwGetKey(impl_->window, GLFW_KEY_KP_ENTER) == GLFW_PRESS;
+    case Key::Tab:
+        glfwKey = GLFW_KEY_TAB;
+        break;
+    case Key::LeftShift:
+        glfwKey = GLFW_KEY_LEFT_SHIFT;
+        break;
+    case Key::LeftControl:
+        glfwKey = GLFW_KEY_LEFT_CONTROL;
+        break;
+    case Key::Q:
+        glfwKey = GLFW_KEY_Q;
+        break;
+    case Key::E:
+        glfwKey = GLFW_KEY_E;
+        break;
+    case Key::R:
+        glfwKey = GLFW_KEY_R;
+        break;
+    case Key::T:
+        glfwKey = GLFW_KEY_T;
+        break;
+    case Key::O:
+        glfwKey = GLFW_KEY_O;
+        break;
+    case Key::F:
+        glfwKey = GLFW_KEY_F;
+        break;
+    case Key::Digit1:
+        glfwKey = GLFW_KEY_1;
+        break;
+    case Key::Digit2:
+        glfwKey = GLFW_KEY_2;
+        break;
     }
     return glfwGetKey(impl_->window, glfwKey) == GLFW_PRESS;
+}
+
+bool Window::getCursorPos(double& outX, double& outY) const {
+    if (!impl_ || !impl_->window) {
+        return false;
+    }
+    glfwGetCursorPos(impl_->window, &outX, &outY);
+    return true;
+}
+
+bool Window::isMouseButtonDown(MouseButton button) const {
+    if (!impl_ || !impl_->window) {
+        return false;
+    }
+    int const b = static_cast<int>(button);
+    return glfwGetMouseButton(impl_->window, b) == GLFW_PRESS;
 }
 
 void Window::setTitle(const std::string& title) {

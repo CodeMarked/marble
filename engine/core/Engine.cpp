@@ -86,6 +86,8 @@ int Engine::run() {
         return 1;
     }
 
+    closeRequested_ = false;
+
     using clock = std::chrono::steady_clock;
     auto lastFrameTime = clock::now();
     FrameDeltaEstimator<4> dtEstimator(1.0 / 60.0, 1.0);
@@ -150,6 +152,10 @@ void Engine::requestClose() {
     if (window_) {
         window_->requestClose();
     }
+    closeRequested_ = true;
+}
+
+void Engine::requestEndRun() {
     closeRequested_ = true;
 }
 

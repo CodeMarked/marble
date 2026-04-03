@@ -99,4 +99,25 @@ private:
     std::vector<std::filesystem::path> searchRoots_{};
 };
 
+/// Runtime categories for higher-level loaders (meshes, images, bytecode) built on `BinaryResourceManager`.
+enum class ResourceKind : std::uint8_t {
+    BinaryBlob,
+    Image,
+    Mesh,
+    ShaderBytecode,
+};
+
+/// Point the manager at a single runtime root (for example `Engine::assetsRootPath()`).
+template <std::size_t Capacity>
+[[nodiscard]] inline bool setBinaryResourceSearchRoot(
+    BinaryResourceManager<Capacity>& mgr,
+    std::filesystem::path const& absoluteRoot
+) {
+    if (absoluteRoot.empty()) {
+        return false;
+    }
+    mgr.setSearchRoots({absoluteRoot});
+    return true;
+}
+
 } // namespace marble::core

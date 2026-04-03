@@ -71,6 +71,9 @@ public:
     /// Stop `run()` after the current frame (ignored in headless mode without a window).
     void requestClose();
 
+    /// End the current `run()` loop without closing the window (e.g. switch from menu to gameplay).
+    void requestEndRun();
+
     /// Replace injected phases with the same defaults `init()` would use (noop render, fixed-step sim).
     void resetPhasesToDefaults();
 

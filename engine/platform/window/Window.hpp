@@ -8,6 +8,13 @@
 namespace marble::platform {
 
 /// Virtual key codes for `isKeyDown` (mapped from GLFW in the implementation).
+/// Mouse buttons for polling after `pollEvents` (GLFW convention).
+enum class MouseButton : int {
+    Left = 0,
+    Right = 1,
+    Middle = 2,
+};
+
 enum class Key : int {
     W,
     A,
@@ -19,6 +26,18 @@ enum class Key : int {
     Down,
     Space,
     Escape,
+    Enter,
+    Tab,
+    LeftShift,
+    LeftControl,
+    Q,
+    E,
+    R,
+    T,
+    O,
+    F,
+    Digit1,
+    Digit2,
 };
 
 /// Cross-platform window abstraction.
@@ -50,6 +69,12 @@ public:
 
     /// Whether `key` is currently held (edge polling; call after `pollEvents` each frame).
     bool isKeyDown(Key key) const;
+
+    /// Cursor position in **window coordinates** (origin top-left). Returns false if unavailable.
+    bool getCursorPos(double& outX, double& outY) const;
+
+    /// Whether `button` is currently pressed (call after `pollEvents`).
+    bool isMouseButtonDown(MouseButton button) const;
 
     /// Update the window title (e.g. score / timer HUD).
     void setTitle(const std::string& title);
