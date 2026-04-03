@@ -2,6 +2,8 @@
 
 C++20 game project with a **Vulkan** rendering path and a small **runtime engine** (windowing, frame phases, logging, asset-root resolution). Much of what lives under `engine/` is **architecture and policy**—headers and tests that describe future systems (physics, audio, animation, networking, and similar)—and is **not** all wired into the shipped `marbles` demo yet.
 
+Long-term direction and **external C++ integrator** roadmap live under **`docs/`** when that tree is present (the default public clone often omits it per `.gitignore`); maintainers with a full checkout should read [`docs/MASTER_PLAN.md`](docs/MASTER_PLAN.md) and [`docs/architecture/sdk-and-samples-roadmap.md`](docs/architecture/sdk-and-samples-roadmap.md).
+
 ## Build (recommended: CMake presets)
 
 From the project root in **PowerShell** (Visual Studio 2022 + CMake required):
@@ -31,6 +33,8 @@ Engine, game, and tests inherit shared flags from [`cmake/MarbleCompileOptions.c
 - **Debug:** `build\vs-debug\game\Debug\marbles.exe`
 - **Release:** `build\vs-release\game\Release\marbles.exe`
 
+Run **`marbles.exe`** from those folders. There is no separate **`garden.exe`**; Garden code is linked into the same binary for tests and future entry points.
+
 Optional: run without a window for a short time (good for quick checks):
 
 ```powershell
@@ -49,6 +53,8 @@ On a machine with multiple Vulkan adapters, you can select the **n**th suitable 
 build\vs-debug\game\Debug\marbles.exe --gpu 0
 ```
 
+With a resolved assets root (default when `assets/` is staged next to the executable), the demo loads mesh SPIR-V through the binary resource registry from **`assets/shaders/`**; otherwise it falls back to **`shaders/`** beside the executable.
+
 ## Test
 
 After a successful configure + build for that preset:
@@ -59,13 +65,17 @@ ctest --preset test-debug
 ctest --preset test-release
 ```
 
-CTest runs these targets:
+CTest registers many policy and subsystem executables under [`tests/CMakeLists.txt`](tests/CMakeLists.txt). Representative targets:
 
 | Test | What it checks |
 | --- | --- |
 | `engine_smoke_test` | Headless engine init → bounded frames → shutdown |
 | `fixed_step_simulation_test` | Fixed-step accumulator and cap behavior |
 | `asset_root_resolution_test` | `resolveAssetsRoot` success and failure paths |
+| `hid_action_context_test` | `ActionPolicy::applyActionContext` / ownership + `clearAllDisabled` |
+| `platform_gamepad_bridge_test` | GLFW init + `syncControllerRouterGamepadSlots`, merge-all / invalid-id paths, `mergeFirstGamepadIntoAbstractControls` smoke (finite outputs) |
+
+A longer sample inventory and ADR mapping live in [`docs/runbooks/testing.md`](docs/runbooks/testing.md) and [`docs/runbooks/adr-test-traceability.md`](docs/runbooks/adr-test-traceability.md) (local `docs/` tree).
 
 You can also configure with a plain out-of-tree build (e.g. `cmake -B build -S .`) and run `ctest -C Debug` from `build/` if you are not using presets.
 
