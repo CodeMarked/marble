@@ -56,6 +56,20 @@ add_test(
     COMMAND asset_root_resolution_test
 )
 
+add_executable(executable_dir_test
+    executable_dir_test.cpp
+)
+
+target_link_libraries(executable_dir_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME executable_dir_test
+    COMMAND executable_dir_test
+)
+
 add_executable(software_engineering_policy_test
     software_engineering_policy_test.cpp
 )
@@ -352,6 +366,35 @@ add_test(
     COMMAND resource_manager_test
 )
 
+add_executable(irender_backend_test
+    irender_backend_test.cpp
+)
+
+target_link_libraries(irender_backend_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME irender_backend_test
+    COMMAND irender_backend_test
+)
+
+add_executable(garden_simulation_test
+    garden_simulation_test.cpp
+)
+
+target_link_libraries(garden_simulation_test
+PRIVATE
+    engine
+    garden_sim
+)
+
+add_test(
+    NAME garden_simulation_test
+    COMMAND garden_simulation_test
+)
+
 add_executable(time_policy_test
     time_policy_test.cpp
 )
@@ -422,6 +465,20 @@ add_test(
     COMMAND hid_mapping_policy_test
 )
 
+add_executable(platform_keyboard_bridge_test
+    platform_keyboard_bridge_test.cpp
+)
+
+target_link_libraries(platform_keyboard_bridge_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME platform_keyboard_bridge_test
+    COMMAND platform_keyboard_bridge_test
+)
+
 add_executable(hid_action_policy_test
     hid_action_policy_test.cpp
 )
@@ -434,6 +491,35 @@ PRIVATE
 add_test(
     NAME hid_action_policy_test
     COMMAND hid_action_policy_test
+)
+
+add_executable(hid_action_context_test
+    hid_action_context_test.cpp
+)
+
+target_link_libraries(hid_action_context_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME hid_action_context_test
+    COMMAND hid_action_context_test
+)
+
+add_executable(platform_gamepad_bridge_test
+    platform_gamepad_bridge_test.cpp
+)
+
+target_link_libraries(platform_gamepad_bridge_test
+PRIVATE
+    engine
+    glfw
+)
+
+add_test(
+    NAME platform_gamepad_bridge_test
+    COMMAND platform_gamepad_bridge_test
 )
 
 add_executable(log_policy_test
@@ -771,3 +857,17 @@ add_test(
     NAME scripting_game_flow_test
     COMMAND scripting_game_flow_test
 )
+
+if(TARGET Jolt)
+    add_executable(jolt_physics_smoke_test
+        jolt_physics_smoke_test.cpp
+    )
+    target_link_libraries(jolt_physics_smoke_test
+    PRIVATE
+        Jolt
+    )
+    add_test(
+        NAME jolt_physics_smoke_test
+        COMMAND jolt_physics_smoke_test
+    )
+endif()

@@ -81,5 +81,28 @@ int main() {
     }
 
     stdfs::remove_all(root, ec);
+
+    {
+        const stdfs::path assetsRoot = stdfs::temp_directory_path() / "marble_rm_shader_assets";
+        stdfs::create_directories(assetsRoot / "shaders", ec);
+        {
+            std::ofstream out(assetsRoot / "shaders" / "dummy.spv", std::ios::binary);
+            const std::array<std::uint8_t, 4> spv{0x03, 0x02, 0x23, 0x07};
+            out.write(reinterpret_cast<const char*>(spv.data()), static_cast<std::streamsize>(spv.size()));
+        }
+        marble::core::BinaryResourceManager<32> rmAssets;
+        rmAssets.setSearchRoots({assetsRoot});
+        if (!rmAssets.acquire("shaders/dummy.spv")) {
+            stdfs::remove_all(assetsRoot, ec);
+            return 12;
+        }
+        const auto* dummy = rmAssets.find("shaders/dummy.spv");
+        if (dummy == nullptr || dummy->bytes.size() != 4) {
+            stdfs::remove_all(assetsRoot, ec);
+            return 13;
+        }
+        stdfs::remove_all(assetsRoot, ec);
+    }
+
     return 0;
 }

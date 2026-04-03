@@ -12,12 +12,14 @@ bool approx(float a, float b, float eps = 1e-4f) {
 int main() {
     using marble::math::Mat4;
     using marble::math::Vec3;
+    using marble::physics::IPhysicsWorld;
     using marble::physics::PhysicsWorldSettings;
     using marble::physics::RigidBodyKinematics;
     using marble::physics::rigidBodyTranslationMatrix;
     using marble::physics::SimplePhysicsWorld;
 
-    SimplePhysicsWorld world;
+    SimplePhysicsWorld worldStorage{};
+    IPhysicsWorld& world = worldStorage;
     PhysicsWorldSettings cfg{};
     cfg.gravity = {0.f, -10.f, 0.f};
     world.setSettings(cfg);
