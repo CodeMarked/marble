@@ -1,18 +1,31 @@
 #include "MarblesGame.hpp"
 
+#include "core/ResourceManager.hpp"
 #include "core/Simulation.hpp"
+#include "input/PlatformGamepadBridge.hpp"
+#include "input/PlatformKeyboardBridge.hpp"
 #include "math/Geometry.hpp"
 #include "math/Mat4.hpp"
 #include "math/Vec3.hpp"
-#include "physics/PhysicsIntegration.hpp"
+#include "physics/IPhysicsScene.hpp"
+#include "physics/MiddlewarePhysicsTypes.hpp"
+#include "physics/PhysicsWorld.hpp"
 #include "platform/window/Window.hpp"
+#include "render/IRenderBackend.hpp"
+#include "render/RenderTypes.hpp"
+#include "render/vulkan/VulkanRhi.hpp"
+#include "shared/PauseMenuInput.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -20,13 +33,55 @@ namespace marble::marbles {
 
 namespace {
 
+using marble::input::AbstractControl;
+using marble::input::AbstractControlArray;
+using marble::input::ActionContextEntry;
+using marble::input::ActionPolicy;
+using marble::input::ControlValueClass;
+using marble::input::InputRemapTable;
+using marble::input::LogicalActionId;
+using marble::input::LogicalDevice;
+using marble::input::actionScalar;
+using marble::input::deviceMask;
+using marble::input::anyStandardGamepadPresent;
+using marble::input::mergeAllConnectedGamepadsIntoAbstractControls;
+using marble::input::sampleKeyboardIntoAbstractControls;
 using marble::math::Aabb;
 using marble::math::Mat4;
 using marble::math::Vec3;
+using marble::physics::PhysicsBodyId;
+using marble::physics::PhysicsDynamicSphereDesc;
+using marble::physics::PhysicsStaticBoxDesc;
+using marble::physics::PhysicsWorldSettings;
 using marble::physics::RigidBodyKinematics;
-using marble::physics::SimplePhysicsWorld;
-using marble::platform::Key;
+using marble::physics::createJoltPhysicsScene;
+using marble::physics::kInvalidPhysicsBodyId;
+using marble::render::FrameOverlayTint;
+using marble::render::IRenderBackend;
+using marble::render::MeshDrawInstance;
 using marble::render::VulkanRhi;
+
+// Logical gameplay actions (keyboard mapped via `InputRemapTable` in `State`).
+static constexpr LogicalActionId kActionPauseMenu = 1;
+static constexpr LogicalActionId kActionBoardPitchPlus = 2;
+static constexpr LogicalActionId kActionBoardPitchMinus = 3;
+static constexpr LogicalActionId kActionBoardRollMinus = 4;
+static constexpr LogicalActionId kActionBoardRollPlus = 5;
+
+static constexpr ActionContextEntry kGameplayContext[] = {
+    {kActionPauseMenu, deviceMask(LogicalDevice::Player), false},
+    {kActionBoardPitchPlus, deviceMask(LogicalDevice::Player), false},
+    {kActionBoardPitchMinus, deviceMask(LogicalDevice::Player), false},
+    {kActionBoardRollMinus, deviceMask(LogicalDevice::Player), false},
+    {kActionBoardRollPlus, deviceMask(LogicalDevice::Player), false},
+};
+
+static constexpr ActionContextEntry kVictoryContext[] = {
+    {kActionBoardPitchPlus, deviceMask(LogicalDevice::Player), true},
+    {kActionBoardPitchMinus, deviceMask(LogicalDevice::Player), true},
+    {kActionBoardRollMinus, deviceMask(LogicalDevice::Player), true},
+    {kActionBoardRollPlus, deviceMask(LogicalDevice::Player), true},
+};
 
 [[nodiscard]] Vec3 clampToAabb(Vec3 p, Aabb const& b) noexcept {
     return {
@@ -184,44 +239,67 @@ void addUvSphere(
     }
 }
 
-[[nodiscard]] bool resolveSphereAabb(Vec3& pos, Vec3& vel, float r, Aabb const& box, float restitution) noexcept {
-    Vec3 const closest = clampToAabb(pos, box);
-    Vec3 delta = pos - closest;
-    float const d2 = marble::math::lengthSquared(delta);
-    if (d2 >= r * r) {
-        return false;
-    }
-    Vec3 n{};
-    if (d2 < 1e-10f) {
-        float const dx = std::min(pos.x - box.min.x, box.max.x - pos.x);
-        float const dy = std::min(pos.y - box.min.y, box.max.y - pos.y);
-        float const dz = std::min(pos.z - box.min.z, box.max.z - pos.z);
-        if (dx <= dy && dx <= dz) {
-            n = pos.x < (box.min.x + box.max.x) * 0.5f ? Vec3{-1.f, 0.f, 0.f} : Vec3{1.f, 0.f, 0.f};
-        } else if (dy <= dz) {
-            n = pos.y < (box.min.y + box.max.y) * 0.5f ? Vec3{0.f, -1.f, 0.f} : Vec3{0.f, 1.f, 0.f};
-        } else {
-            n = pos.z < (box.min.z + box.max.z) * 0.5f ? Vec3{0.f, 0.f, -1.f} : Vec3{0.f, 0.f, 1.f};
-        }
-        pos = closest + n * r;
-    } else {
-        float const d = std::sqrt(d2);
-        n = delta * (1.f / d);
-        pos = closest + n * r;
-    }
-    float const vn = marble::math::dot(vel, n);
-    if (vn < 0.f) {
-        vel = vel - n * (vn * (1.f + restitution));
-    }
-    return true;
-}
-
 } // namespace
 
 struct Pickup {
     Aabb box{};
     bool taken = false;
 };
+
+namespace {
+
+/// Board tilt + [`IPhysicsScene::step`](physics/IPhysicsScene.hpp) (Jolt); pickups / fall / win are game rules.
+void stepMarbleSimulation(
+    float deltaSeconds,
+    float boardPitch,
+    float boardRoll,
+    marble::physics::IPhysicsScene& scene,
+    PhysicsBodyId marbleBodyId,
+    PhysicsWorldSettings& worldSettings,
+    RigidBodyKinematics& marble,
+    Vec3 const& marbleResetPosition,
+    std::vector<Pickup>& pickups,
+    int& collected,
+    int totalPickups,
+    bool& won
+) {
+    Mat4 const board = boardMatrix(boardPitch, boardRoll);
+    Vec3 const gWorld{0.f, -9.81f, 0.f};
+    Vec3 const gLocal = transformDirectionTranspose(board, gWorld);
+    worldSettings.gravity = gLocal;
+
+    // Jolt may keep the marble asleep after settling; changing gravity does not wake it, so tangential g is ignored.
+    scene.activateBody(marbleBodyId);
+
+    scene.step(deltaSeconds, worldSettings, {});
+
+    PhysicsBodyId const ids[1] = {marbleBodyId};
+    scene.readBackKinematics(ids, &marble, 1);
+
+    constexpr float marbleR = 0.25f;
+
+    for (Pickup& p : pickups) {
+        if (p.taken) {
+            continue;
+        }
+        Vec3 c = clampToAabb(marble.position, p.box);
+        if (marble::math::lengthSquared(marble.position - c) < marbleR * marbleR) {
+            p.taken = true;
+            ++collected;
+        }
+    }
+
+    if (marble.position.y < -2.f) {
+        marble.position = marbleResetPosition;
+        marble.linearVelocity = Vec3::zero();
+        scene.setBodyCenterAndLinearVelocity(marbleBodyId, marble.position, marble.linearVelocity);
+    }
+    if (collected >= totalPickups) {
+        won = true;
+    }
+}
+
+} // namespace
 
 struct MarblesGame::State final {
     core::Engine& engine;
@@ -235,7 +313,9 @@ struct MarblesGame::State final {
     float rollVel = 0.f;
 
     RigidBodyKinematics marble{};
-    SimplePhysicsWorld physics{};
+    std::unique_ptr<marble::physics::IPhysicsScene> physicsScene_{createJoltPhysicsScene()};
+    PhysicsBodyId marbleBodyId_{kInvalidPhysicsBodyId};
+    PhysicsWorldSettings physicsWorldSettings_{};
     std::vector<Aabb> staticColliders{};
     std::vector<Pickup> pickups{};
     Vec3 marbleStart{};
@@ -247,13 +327,79 @@ struct MarblesGame::State final {
 
     float cameraSmoothT = 0.f;
 
-    std::vector<VulkanRhi::DrawCommand> drawScratch{};
+    std::vector<MeshDrawInstance> drawScratch{};
+
+    InputRemapTable inputRemap_{};
+    ActionPolicy<256> inputPolicy_{};
+    AbstractControlArray controlScratch_{};
+    marble::core::BinaryResourceManager<64> assetRegistry_{};
+    bool assetRegistryPrimed_{false};
+    bool victoryInputGatesApplied_{false};
+
+    bool paused = false;
+    bool pauseBackWasDown = false;
+    bool menuQWasDown = false;
+    bool menuRWasDown = false;
+    bool padMenuAWasDown = false;
+    bool padMenuXWasDown = false;
+    bool padMenuBWasDown = false;
+
+    void rebuildMarblesPhysics() {
+        physicsScene_->clear();
+        marble::physics::PhysicsBodyMaterial wallMaterial{};
+        wallMaterial.restitution = 0.12f;
+        wallMaterial.friction = 0.45f;
+        for (Aabb const& box : staticColliders) {
+            PhysicsStaticBoxDesc desc{};
+            desc.bounds = box;
+            desc.material = wallMaterial;
+            (void)physicsScene_->addStaticBox(desc);
+        }
+        physicsScene_->optimizeBroadPhase();
+
+        constexpr float marbleR = 0.25f;
+        PhysicsDynamicSphereDesc sphere{};
+        sphere.center = marbleStart;
+        sphere.linearVelocity = Vec3::zero();
+        sphere.radius = marbleR;
+        sphere.invMass = 1.f;
+        sphere.material.restitution = 0.18f;
+        sphere.material.friction = 0.35f;
+        sphere.material.linearDamping = 0.02f;
+        sphere.material.angularDamping = 0.15f;
+        marbleBodyId_ = physicsScene_->addDynamicSphere(sphere);
+
+        marble.position = marbleStart;
+        marble.linearVelocity = Vec3::zero();
+        marble.invMass = 1.f;
+    }
 
     explicit State(core::Engine& e) : engine(e) {
-        marble.invMass = 1.f;
         marbleStart = {0.f, 0.35f, 0.f};
-        marble.position = marbleStart;
-        physics.setSettings({.gravity = Vec3::zero(), .maxSubSteps = 1});
+        physicsWorldSettings_.gravity = Vec3::zero();
+        physicsWorldSettings_.maxSubSteps = 2;
+        physicsWorldSettings_.enableContinuousCollision = true;
+
+        (void)inputRemap_.bind(
+            AbstractControl::LPadUp,
+            {kActionBoardPitchPlus, ControlValueClass::DigitalButton, false}
+        );
+        (void)inputRemap_.bind(
+            AbstractControl::LPadDown,
+            {kActionBoardPitchMinus, ControlValueClass::DigitalButton, false}
+        );
+        (void)inputRemap_.bind(
+            AbstractControl::LPadLeft,
+            {kActionBoardRollMinus, ControlValueClass::DigitalButton, false}
+        );
+        (void)inputRemap_.bind(
+            AbstractControl::LPadRight,
+            {kActionBoardRollPlus, ControlValueClass::DigitalButton, false}
+        );
+        (void)inputRemap_.bind(AbstractControl::BackSelect, {kActionPauseMenu, ControlValueClass::DigitalButton, false});
+
+        inputPolicy_.resetActionGates();
+        inputPolicy_.applyActionContext(std::span{kGameplayContext});
 
         staticColliders.push_back({{-6.f, -0.2f, -6.f}, {6.f, 0.f, 6.f}});
         float const t = 0.15f;
@@ -269,99 +415,183 @@ struct MarblesGame::State final {
         pickups.push_back({{{1.f, 0.15f, -2.5f}, {1.3f, 0.45f, -2.2f}}, false});
         pickups.push_back({{{0.f, 0.15f, 0.f}, {0.3f, 0.45f, 0.3f}}, false});
         totalPickups = static_cast<int>(pickups.size());
+
+        rebuildMarblesPhysics();
     }
 
     void resetMarble() {
-        marble.position = marbleStart;
-        marble.linearVelocity = Vec3::zero();
+        rebuildMarblesPhysics();
+    }
+
+    void restartMarblesLevel() {
+        for (Pickup& p : pickups) {
+            p.taken = false;
+        }
+        collected = 0;
+        won = false;
+        victoryInputGatesApplied_ = false;
+        boardPitch = 0.f;
+        boardRoll = 0.f;
+        pitchVel = 0.f;
+        rollVel = 0.f;
+        resetMarble();
+        inputPolicy_.resetActionGates();
+        inputPolicy_.applyActionContext(std::span{kGameplayContext});
+        paused = false;
+        pauseBackWasDown = false;
+    }
+
+    void primeAssetRegistryOnce() {
+        if (assetRegistryPrimed_) {
+            return;
+        }
+        assetRegistryPrimed_ = true;
+        std::string const root = engine.assetsRootPath();
+        if (root.empty()) {
+            return;
+        }
+        (void)marble::core::setBinaryResourceSearchRoot(assetRegistry_, std::filesystem::path(root));
+        (void)assetRegistry_.acquire("README.txt");
     }
 
     void step(core::Engine::FrameContext const& ctx) {
-        elapsed += ctx.deltaSeconds;
-        if (won) {
-            return;
+        primeAssetRegistryOnce();
+        if (!paused) {
+            elapsed += ctx.deltaSeconds;
         }
 
         float const h = static_cast<float>(ctx.deltaSeconds);
         constexpr float tiltAccel = 1.8f;
         constexpr float tiltDamp = 0.92f;
         constexpr float maxTilt = 0.55f;
+        constexpr LogicalDevice kPlayer = LogicalDevice::Player;
 
         if (auto* w = engine.window()) {
-            if (w->isKeyDown(Key::Escape)) {
-                engine.requestClose();
+            sampleKeyboardIntoAbstractControls(*w, controlScratch_);
+            mergeAllConnectedGamepadsIntoAbstractControls(controlScratch_);
+
+            bool const pauseHeld =
+                actionScalar(kActionPauseMenu, controlScratch_, inputRemap_, inputPolicy_, kPlayer) >= 0.5f ||
+                w->isKeyDown(marble::platform::Key::Escape);
+            if (marble::game_shared::pauseMenuToggleEdge(pauseHeld, pauseBackWasDown)) {
+                paused = !paused;
             }
-            float pIn = 0.f;
-            float rIn = 0.f;
-            if (w->isKeyDown(Key::W) || w->isKeyDown(Key::Up)) {
-                pIn += 1.f;
+
+            if (paused) {
+                bool const rDown = w->isKeyDown(marble::platform::Key::R);
+                if (rDown && !menuRWasDown) {
+                    restartMarblesLevel();
+                }
+                bool const qDown = w->isKeyDown(marble::platform::Key::Q);
+                if (marble::game_shared::pauseMenuReturnToMainMenuQEdge(qDown, menuQWasDown)) {
+                    engine.requestEndRun();
+                }
+                menuRWasDown = rDown;
+
+                std::size_t const iPadA = static_cast<std::size_t>(AbstractControl::RPadDown);
+                std::size_t const iPadX = static_cast<std::size_t>(AbstractControl::RPadLeft);
+                std::size_t const iPadB = static_cast<std::size_t>(AbstractControl::RPadRight);
+                bool const aDown = controlScratch_[iPadA] >= 0.5f;
+                bool const xDown = controlScratch_[iPadX] >= 0.5f;
+                bool const bDown = controlScratch_[iPadB] >= 0.5f;
+                if (aDown && !padMenuAWasDown) {
+                    paused = false;
+                }
+                if (xDown && !padMenuXWasDown) {
+                    restartMarblesLevel();
+                }
+                if (marble::game_shared::pauseMenuReturnToMainMenuPadBEdge(bDown, padMenuBWasDown)) {
+                    engine.requestEndRun();
+                }
+                padMenuAWasDown = aDown;
+                padMenuXWasDown = xDown;
+            } else {
+                menuRWasDown = w->isKeyDown(marble::platform::Key::R);
+                menuQWasDown = w->isKeyDown(marble::platform::Key::Q);
+                padMenuAWasDown =
+                    controlScratch_[static_cast<std::size_t>(AbstractControl::RPadDown)] >= 0.5f;
+                padMenuXWasDown =
+                    controlScratch_[static_cast<std::size_t>(AbstractControl::RPadLeft)] >= 0.5f;
+                padMenuBWasDown =
+                    controlScratch_[static_cast<std::size_t>(AbstractControl::RPadRight)] >= 0.5f;
+
+                if (!won) {
+                    float const pitchPlus =
+                        actionScalar(kActionBoardPitchPlus, controlScratch_, inputRemap_, inputPolicy_, kPlayer);
+                    float const pitchMinus =
+                        actionScalar(kActionBoardPitchMinus, controlScratch_, inputRemap_, inputPolicy_, kPlayer);
+                    float const rollMinus =
+                        actionScalar(kActionBoardRollMinus, controlScratch_, inputRemap_, inputPolicy_, kPlayer);
+                    float const rollPlus =
+                        actionScalar(kActionBoardRollPlus, controlScratch_, inputRemap_, inputPolicy_, kPlayer);
+                    float const pIn = pitchPlus - pitchMinus;
+                    float const rIn = rollPlus - rollMinus;
+                    pitchVel += pIn * tiltAccel * h;
+                    rollVel += rIn * tiltAccel * h;
+                }
             }
-            if (w->isKeyDown(Key::S) || w->isKeyDown(Key::Down)) {
-                pIn -= 1.f;
-            }
-            if (w->isKeyDown(Key::A) || w->isKeyDown(Key::Left)) {
-                rIn -= 1.f;
-            }
-            if (w->isKeyDown(Key::D) || w->isKeyDown(Key::Right)) {
-                rIn += 1.f;
-            }
-            pitchVel += pIn * tiltAccel * h;
-            rollVel += rIn * tiltAccel * h;
         }
-        pitchVel *= tiltDamp;
-        rollVel *= tiltDamp;
-        boardPitch += pitchVel * h;
-        boardRoll += rollVel * h;
-        boardPitch = std::clamp(boardPitch, -maxTilt, maxTilt);
-        boardRoll = std::clamp(boardRoll, -maxTilt, maxTilt);
 
-        Mat4 const board = boardMatrix(boardPitch, boardRoll);
-        Vec3 const gWorld{0.f, -9.81f, 0.f};
-        Vec3 gLocal = transformDirectionTranspose(board, gWorld);
-        auto settings = physics.settings();
-        settings.gravity = gLocal;
-        physics.setSettings(settings);
+        if (!paused && !won) {
+            pitchVel *= tiltDamp;
+            rollVel *= tiltDamp;
+            boardPitch += pitchVel * h;
+            boardRoll += rollVel * h;
+            boardPitch = std::clamp(boardPitch, -maxTilt, maxTilt);
+            boardRoll = std::clamp(boardRoll, -maxTilt, maxTilt);
 
-        physics.step(h, &marble, 1);
-
-        constexpr float marbleR = 0.25f;
-        constexpr float rest = 0.12f;
-        for (Aabb const& box : staticColliders) {
-            (void)resolveSphereAabb(marble.position, marble.linearVelocity, marbleR, box, rest);
+            stepMarbleSimulation(
+                h,
+                boardPitch,
+                boardRoll,
+                *physicsScene_,
+                marbleBodyId_,
+                physicsWorldSettings_,
+                marble,
+                marbleStart,
+                pickups,
+                collected,
+                totalPickups,
+                won
+            );
         }
 
-        for (Pickup& p : pickups) {
-            if (p.taken) {
-                continue;
-            }
-            Vec3 c = clampToAabb(marble.position, p.box);
-            if (marble::math::lengthSquared(marble.position - c) < marbleR * marbleR) {
-                p.taken = true;
-                ++collected;
-            }
-        }
-
-        if (marble.position.y < -2.f) {
-            resetMarble();
-        }
-        if (collected >= totalPickups) {
-            won = true;
+        if (won && !victoryInputGatesApplied_) {
+            inputPolicy_.resetActionGates();
+            inputPolicy_.applyActionContext(std::span{kVictoryContext});
+            victoryInputGatesApplied_ = true;
+            pitchVel = 0.f;
+            rollVel = 0.f;
         }
 
         if (auto* w = engine.window()) {
             char buf[160];
-            if (won) {
+            if (paused) {
+                if (anyStandardGamepadPresent()) {
+                    (void)std::snprintf(
+                        buf,
+                        sizeof(buf),
+                        "Marbles - Paused  R restart  Q main menu  Esc resume  pad A/X/B like Garden"
+                    );
+                } else {
+                    (void)std::snprintf(
+                        buf,
+                        sizeof(buf),
+                        "Marbles - Paused  R restart  Q main menu  Esc resume"
+                    );
+                }
+            } else if (won) {
                 (void)std::snprintf(
                     buf,
                     sizeof(buf),
-                    "Marbles - You won! %.1fs  (Esc to quit)",
+                    "Marbles - You won! %.1fs  Esc pause  Q menu when paused",
                     static_cast<float>(elapsed)
                 );
             } else {
                 (void)std::snprintf(
                     buf,
                     sizeof(buf),
-                    "Marbles - Gems %d/%d  WASD/Arrows tilt  (Esc quit)",
+                    "Marbles - Gems %d/%d  tilt  Esc pause",
                     collected,
                     totalPickups
                 );
@@ -372,7 +602,8 @@ struct MarblesGame::State final {
 
     void renderFrame(core::Engine::FrameContext const& ctx) {
         (void)ctx;
-        if (!rhi.initialized() || meshCube == std::numeric_limits<std::uint32_t>::max() ||
+        IRenderBackend& backend = rhi;
+        if (!backend.initialized() || meshCube == std::numeric_limits<std::uint32_t>::max() ||
             meshSphere == std::numeric_limits<std::uint32_t>::max()) {
             return;
         }
@@ -397,7 +628,7 @@ struct MarblesGame::State final {
         drawScratch.reserve(32);
 
         auto pushCube = [&](Mat4 const& model, Vec3 color) {
-            VulkanRhi::DrawCommand d{};
+            MeshDrawInstance d{};
             d.meshIndex = meshCube;
             d.model = model;
             d.color = color;
@@ -440,15 +671,21 @@ struct MarblesGame::State final {
         }
 
         {
-            VulkanRhi::DrawCommand d{};
+            MeshDrawInstance d{};
             d.meshIndex = meshSphere;
-            d.model = board * Mat4::translation(marble.position) * Mat4::scaling({0.25f, 0.25f, 0.25f});
+            d.model = board * physicsScene_->bodyWorldMatrix(marbleBodyId_) * Mat4::scaling({0.25f, 0.25f, 0.25f});
             d.color = {0.85f, 0.2f, 0.15f};
             drawScratch.push_back(d);
         }
 
         if (auto* w = engine.window()) {
-            (void)rhi.drawFrame(*w, viewProj, drawScratch);
+            FrameOverlayTint tint{};
+            FrameOverlayTint const* overlay = nullptr;
+            if (paused) {
+                tint = FrameOverlayTint{0.02f, 0.025f, 0.07f, 0.42f};
+                overlay = &tint;
+            }
+            (void)backend.drawFrame(*w, viewProj, drawScratch, overlay);
         }
     }
 };
@@ -489,10 +726,30 @@ bool MarblesGame::initGraphics(std::string shaderDirectory, std::optional<std::u
     if (!engine_.window()) {
         return false;
     }
-    if (!state_->rhi.init(*engine_.window(), "Marbles", std::move(shaderDirectory), physicalDeviceIndex)) {
-        return false;
+    bool vkOk = false;
+    std::string const assetsRoot = engine_.assetsRootPath();
+    if (!assetsRoot.empty()) {
+        (void)marble::core::setBinaryResourceSearchRoot(state_->assetRegistry_, std::filesystem::path(assetsRoot));
+        // ResourceKind::ShaderBytecode — registry path matches staged `assets/shaders/*.spv`.
+        if (state_->assetRegistry_.acquire("shaders/mesh.vert.spv") &&
+            state_->assetRegistry_.acquire("shaders/mesh.frag.spv")) {
+            marble::core::BinaryResource const* const vertRes = state_->assetRegistry_.find("shaders/mesh.vert.spv");
+            marble::core::BinaryResource const* const fragRes = state_->assetRegistry_.find("shaders/mesh.frag.spv");
+            if (vertRes != nullptr && fragRes != nullptr) {
+                std::span<std::uint8_t const> const vspan(vertRes->bytes.data(), vertRes->bytes.size());
+                std::span<std::uint8_t const> const fspan(fragRes->bytes.data(), fragRes->bytes.size());
+                vkOk = state_->rhi.initFromSpirvBytes(
+                    *engine_.window(), "Marbles", vspan, fspan, physicalDeviceIndex);
+            }
+        }
     }
-    state_->rhi.setClearColor(0.06f, 0.07f, 0.1f, 1.f);
+    if (!vkOk) {
+        if (!state_->rhi.init(*engine_.window(), "Marbles", std::move(shaderDirectory), physicalDeviceIndex)) {
+            return false;
+        }
+    }
+    IRenderBackend& renderBackend = state_->rhi;
+    renderBackend.setClearColor(0.06f, 0.07f, 0.1f, 1.f);
 
     std::vector<VulkanRhi::Vertex> cv;
     std::vector<std::uint32_t> ci;

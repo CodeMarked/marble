@@ -1,7 +1,6 @@
 #pragma once
 
 #include "core/Engine.hpp"
-#include "render/vulkan/VulkanRhi.hpp"
 
 #include <cstdint>
 #include <memory>
