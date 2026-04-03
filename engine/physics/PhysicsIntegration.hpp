@@ -1,6 +1,7 @@
 #pragma once
 
 #include "math/Mat4.hpp"
+#include "physics/PhysicsWorld.hpp"
 #include "physics/RigidBodyDynamics.hpp"
 
 #include <cstddef>
@@ -8,29 +9,20 @@
 
 namespace marble::physics {
 
-/// Tunables for a **game-owned** physics step. `SimplePhysicsWorld` applies only `gravity` today;
-/// `enableContinuousCollision` and `maxSubSteps` reserve policy for middleware / advanced pipelines
-/// (book §13.6) without changing baseline behavior until wired.
-struct PhysicsWorldSettings {
-    math::Vec3 gravity{0.f, -9.81f, 0.f};
-    bool enableContinuousCollision{};
-    std::uint8_t maxSubSteps{1u};
-};
-
 /// Minimal stand-in for a third-party physics `World` (book §13.5): uniform gravity + per-body
 /// [`integrateSemiImplicitEuler`](RigidBodyDynamics.hpp). Replace `step` internals with SDK calls when
-/// linking middleware; keep `PhysicsWorldSettings` as the engine-side configuration seam.
-class SimplePhysicsWorld {
+/// linking middleware; keep [`PhysicsWorldSettings`](PhysicsWorld.hpp) as the engine-side configuration seam.
+class SimplePhysicsWorld final : public IPhysicsWorld {
 public:
-    void setSettings(PhysicsWorldSettings settings) noexcept {
+    void setSettings(PhysicsWorldSettings settings) noexcept override {
         settings_ = settings;
     }
 
-    [[nodiscard]] PhysicsWorldSettings settings() const noexcept {
+    [[nodiscard]] PhysicsWorldSettings settings() const noexcept override {
         return settings_;
     }
 
-    void step(float deltaSeconds, RigidBodyKinematics* bodies, std::size_t bodyCount) noexcept {
+    void step(float deltaSeconds, RigidBodyKinematics* bodies, std::size_t bodyCount) noexcept override {
         if (deltaSeconds <= 0.f || bodies == nullptr) {
             return;
         }
