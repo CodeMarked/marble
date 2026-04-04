@@ -10,7 +10,6 @@
 
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -182,8 +181,11 @@ struct SwapchainSupportDetails {
 }
 
 [[nodiscard]] VkPresentModeKHR choosePresentMode(std::vector<VkPresentModeKHR> const& modes) {
-    (void)modes;
-    // FIFO is strictly ordered (vsync). MAILBOX + marginal sync bugs has produced "clear only" frames on some drivers.
+    for (auto m : modes) {
+        if (m == VK_PRESENT_MODE_MAILBOX_KHR) {
+            return m;
+        }
+    }
     return VK_PRESENT_MODE_FIFO_KHR;
 }
 
@@ -219,7 +221,6 @@ struct PushConstants {
     float color[4];
     std::uint32_t drawFlags{};
 };
-static_assert(sizeof(PushConstants) == 84u, "PushConstants must match mesh.{vert,frag} std430 offsets (80+4)");
 
 struct GpuMesh {
     VkBuffer vertexBuffer = VK_NULL_HANDLE;
@@ -503,32 +504,6 @@ void copyBuffer(VulkanRhiImpl& impl, VkBuffer src, VkBuffer dst, VkDeviceSize si
 
 bool createSwapchainFull(VulkanRhiImpl& impl, platform::Window& window);
 
-[[nodiscard]] bool recreateRenderFinishedSemaphores(VulkanRhiImpl& impl, std::uint32_t swapchainImageCount) {
-    for (VkSemaphore s : impl.renderFinishedSemaphores) {
-        if (s != VK_NULL_HANDLE) {
-            vkDestroySemaphore(impl.device, s, nullptr);
-        }
-    }
-    impl.renderFinishedSemaphores.clear();
-    if (swapchainImageCount == 0) {
-        return false;
-    }
-    impl.renderFinishedSemaphores.resize(swapchainImageCount);
-    VkSemaphoreCreateInfo sci{};
-    sci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-    for (std::uint32_t i = 0; i < swapchainImageCount; ++i) {
-        if (vkCreateSemaphore(impl.device, &sci, nullptr, &impl.renderFinishedSemaphores[i]) != VK_SUCCESS) {
-            for (std::uint32_t j = 0; j < i; ++j) {
-                vkDestroySemaphore(impl.device, impl.renderFinishedSemaphores[j], nullptr);
-                impl.renderFinishedSemaphores[j] = VK_NULL_HANDLE;
-            }
-            impl.renderFinishedSemaphores.clear();
-            return false;
-        }
-    }
-    return true;
-}
-
 bool recreateSwapchain(VulkanRhiImpl& impl, platform::Window& window) {
     int w = 0, h = 0;
     window.getFramebufferSize(&w, &h);
@@ -674,9 +649,6 @@ bool createSwapchainFull(VulkanRhiImpl& impl, platform::Window& window) {
         return false;
     }
     impl.imagesInFlight.assign(n, VK_NULL_HANDLE);
-    if (!recreateRenderFinishedSemaphores(impl, n)) {
-        return false;
-    }
     return true;
 }
 
@@ -749,8 +721,7 @@ bool createRenderPassAndPipeline(VulkanRhiImpl& impl) {
     }
 
     VkPushConstantRange pcr{};
-    // Mesh shaders read push data only in the vertex stage; fragment uses flat varyings (see mesh.vert / mesh.frag).
-    pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     pcr.offset = 0;
     pcr.size = sizeof(PushConstants);
 
@@ -850,10 +821,8 @@ bool createRenderPassAndPipeline(VulkanRhiImpl& impl) {
 
     VkPipelineDepthStencilStateCreateInfo dsMain{};
     dsMain.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-    // UI and clip-space draws use z=0..1 in NDC; some stacks were easier to validate with depth off for the main pass.
-    // Garden/Marbles rely on draw order for overlapping meshes; revisit split UI/world pipelines if precision is needed.
-    dsMain.depthTestEnable = VK_FALSE;
-    dsMain.depthWriteEnable = VK_FALSE;
+    dsMain.depthTestEnable = VK_TRUE;
+    dsMain.depthWriteEnable = VK_TRUE;
     dsMain.depthCompareOp = VK_COMPARE_OP_LESS;
 
     VkPipelineDepthStencilStateCreateInfo dsOverlay{};
@@ -862,34 +831,20 @@ bool createRenderPassAndPipeline(VulkanRhiImpl& impl) {
     dsOverlay.depthWriteEnable = VK_FALSE;
     dsOverlay.depthCompareOp = VK_COMPARE_OP_ALWAYS;
 
-    VkPipelineColorBlendAttachmentState cbaMain{};
-    cbaMain.blendEnable = VK_TRUE;
-    cbaMain.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-    cbaMain.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-    cbaMain.colorBlendOp = VK_BLEND_OP_ADD;
-    cbaMain.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-    cbaMain.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-    cbaMain.alphaBlendOp = VK_BLEND_OP_ADD;
-    cbaMain.colorWriteMask =
+    VkPipelineColorBlendAttachmentState cba{};
+    cba.blendEnable = VK_TRUE;
+    cba.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    cba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    cba.colorBlendOp = VK_BLEND_OP_ADD;
+    cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    cba.alphaBlendOp = VK_BLEND_OP_ADD;
+    cba.colorWriteMask =
         VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-    VkPipelineColorBlendAttachmentState cbaOverlay{};
-    cbaOverlay.blendEnable = VK_TRUE;
-    cbaOverlay.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-    cbaOverlay.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-    cbaOverlay.colorBlendOp = VK_BLEND_OP_ADD;
-    cbaOverlay.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-    cbaOverlay.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-    cbaOverlay.alphaBlendOp = VK_BLEND_OP_ADD;
-    cbaOverlay.colorWriteMask =
-        VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-    VkPipelineColorBlendStateCreateInfo cbMain{};
-    cbMain.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    cbMain.attachmentCount = 1;
-    cbMain.pAttachments = &cbaMain;
-    VkPipelineColorBlendStateCreateInfo cbOverlay{};
-    cbOverlay.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    cbOverlay.attachmentCount = 1;
-    cbOverlay.pAttachments = &cbaOverlay;
+    VkPipelineColorBlendStateCreateInfo cb{};
+    cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    cb.attachmentCount = 1;
+    cb.pAttachments = &cba;
 
     std::array<VkDynamicState, 2> dyn = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
     VkPipelineDynamicStateCreateInfo dy{};
@@ -907,7 +862,7 @@ bool createRenderPassAndPipeline(VulkanRhiImpl& impl) {
     gpi.pRasterizationState = &rs;
     gpi.pMultisampleState = &ms;
     gpi.pDepthStencilState = &dsMain;
-    gpi.pColorBlendState = &cbMain;
+    gpi.pColorBlendState = &cb;
     gpi.pDynamicState = &dy;
     gpi.layout = impl.pipelineLayout;
     gpi.renderPass = impl.renderPass;
@@ -923,7 +878,6 @@ bool createRenderPassAndPipeline(VulkanRhiImpl& impl) {
     rsOverlay.cullMode = VK_CULL_MODE_NONE;
     gpi.pRasterizationState = &rsOverlay;
     gpi.pDepthStencilState = &dsOverlay;
-    gpi.pColorBlendState = &cbOverlay;
     if (vkCreateGraphicsPipelines(impl.device, VK_NULL_HANDLE, 1, &gpi, nullptr, &impl.overlayPipeline) != VK_SUCCESS) {
         vkDestroyPipeline(impl.device, impl.graphicsPipeline, nullptr);
         impl.graphicsPipeline = VK_NULL_HANDLE;
@@ -1150,6 +1104,7 @@ bool createRenderPassAndPipeline(VulkanRhiImpl& impl) {
     }
 
     d.imageAvailableSemaphores.resize(VulkanRhiImpl::kMaxFramesInFlight);
+    d.renderFinishedSemaphores.resize(VulkanRhiImpl::kMaxFramesInFlight);
     d.inFlightFences.resize(VulkanRhiImpl::kMaxFramesInFlight);
     VkSemaphoreCreateInfo sci{};
     sci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
@@ -1158,12 +1113,11 @@ bool createRenderPassAndPipeline(VulkanRhiImpl& impl) {
     fci.flags = VK_FENCE_CREATE_SIGNALED_BIT;
     for (int i = 0; i < VulkanRhiImpl::kMaxFramesInFlight; ++i) {
         if (vkCreateSemaphore(d.device, &sci, nullptr, &d.imageAvailableSemaphores[i]) != VK_SUCCESS ||
+            vkCreateSemaphore(d.device, &sci, nullptr, &d.renderFinishedSemaphores[i]) != VK_SUCCESS ||
             vkCreateFence(d.device, &fci, nullptr, &d.inFlightFences[i]) != VK_SUCCESS) {
             return false;
         }
     }
-    // renderFinishedSemaphores: one per swapchain image (see createSwapchainFull); avoids VUID
-    // vkQueueSubmit-pSignalSemaphores-00067 when image count > kMaxFramesInFlight.
 
     return true;
 }
@@ -1453,6 +1407,20 @@ bool VulkanRhi::replaceMesh(
     }
     VulkanRhiImpl& d = *impl_;
     vkDeviceWaitIdle(d.device);
+    GpuMesh& old = d.meshes[meshIndex];
+    if (old.indexBuffer) {
+        vkDestroyBuffer(d.device, old.indexBuffer, nullptr);
+    }
+    if (old.vertexBuffer) {
+        vkDestroyBuffer(d.device, old.vertexBuffer, nullptr);
+    }
+    if (old.indexMemory) {
+        vkFreeMemory(d.device, old.indexMemory, nullptr);
+    }
+    if (old.vertexMemory) {
+        vkFreeMemory(d.device, old.vertexMemory, nullptr);
+    }
+    old = {};
 
     VkDeviceSize vbSize = sizeof(Vertex) * vertices.size();
     VkDeviceSize ibSize = sizeof(std::uint32_t) * indices.size();
@@ -1492,14 +1460,14 @@ bool VulkanRhi::replaceMesh(
     std::memcpy(data, indices.data(), static_cast<std::size_t>(ibSize));
     vkUnmapMemory(d.device, stagingIbMem);
 
-    GpuMesh newMesh{};
+    GpuMesh mesh{};
     if (!createBuffer(
             d,
             vbSize,
             VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-            newMesh.vertexBuffer,
-            newMesh.vertexMemory
+            mesh.vertexBuffer,
+            mesh.vertexMemory
         )) {
         vkDestroyBuffer(d.device, stagingVb, nullptr);
         vkFreeMemory(d.device, stagingVbMem, nullptr);
@@ -1512,40 +1480,26 @@ bool VulkanRhi::replaceMesh(
             ibSize,
             VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-            newMesh.indexBuffer,
-            newMesh.indexMemory
+            mesh.indexBuffer,
+            mesh.indexMemory
         )) {
-        vkDestroyBuffer(d.device, newMesh.vertexBuffer, nullptr);
-        vkFreeMemory(d.device, newMesh.vertexMemory, nullptr);
+        vkDestroyBuffer(d.device, mesh.vertexBuffer, nullptr);
+        vkFreeMemory(d.device, mesh.vertexMemory, nullptr);
         vkDestroyBuffer(d.device, stagingVb, nullptr);
         vkFreeMemory(d.device, stagingVbMem, nullptr);
         vkDestroyBuffer(d.device, stagingIb, nullptr);
         vkFreeMemory(d.device, stagingIbMem, nullptr);
         return false;
     }
-    copyBuffer(d, stagingVb, newMesh.vertexBuffer, vbSize);
-    copyBuffer(d, stagingIb, newMesh.indexBuffer, ibSize);
+    copyBuffer(d, stagingVb, mesh.vertexBuffer, vbSize);
+    copyBuffer(d, stagingIb, mesh.indexBuffer, ibSize);
     vkDestroyBuffer(d.device, stagingVb, nullptr);
     vkFreeMemory(d.device, stagingVbMem, nullptr);
     vkDestroyBuffer(d.device, stagingIb, nullptr);
     vkFreeMemory(d.device, stagingIbMem, nullptr);
 
-    newMesh.indexCount = static_cast<std::uint32_t>(indices.size());
-
-    GpuMesh& slot = d.meshes[meshIndex];
-    if (slot.indexBuffer) {
-        vkDestroyBuffer(d.device, slot.indexBuffer, nullptr);
-    }
-    if (slot.vertexBuffer) {
-        vkDestroyBuffer(d.device, slot.vertexBuffer, nullptr);
-    }
-    if (slot.indexMemory) {
-        vkFreeMemory(d.device, slot.indexMemory, nullptr);
-    }
-    if (slot.vertexMemory) {
-        vkFreeMemory(d.device, slot.vertexMemory, nullptr);
-    }
-    slot = newMesh;
+    mesh.indexCount = static_cast<std::uint32_t>(indices.size());
+    d.meshes[meshIndex] = mesh;
     return true;
 }
 
@@ -1566,21 +1520,6 @@ void VulkanRhi::ensureFullscreenQuadMesh() {
     d.fullscreenQuadMesh = uploadMesh(std::span<Vertex const>(verts.data(), verts.size()), idx);
 }
 
-// #region agent log
-static void agentVulkanDbgLog(char const* hypothesisId, char const* location, char const* message, int a, int b, int c, int d) {
-    std::ofstream os(R"(c:\dev\mark\marble\debug-a54c30.log)", std::ios::app);
-    if (!os) {
-        return;
-    }
-    auto const ts = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::system_clock::now().time_since_epoch())
-                        .count();
-    os << "{\"sessionId\":\"a54c30\",\"hypothesisId\":\"" << hypothesisId << "\",\"location\":\"" << location
-       << "\",\"message\":\"" << message << "\",\"data\":{\"a\":" << a << ",\"b\":" << b << ",\"c\":" << c << ",\"d\":" << d
-       << "},\"timestamp\":" << ts << "}\n";
-}
-// #endregion
-
 bool VulkanRhi::drawFrame(
     platform::Window& window,
     math::Mat4 const& viewProj,
@@ -1591,37 +1530,12 @@ bool VulkanRhi::drawFrame(
         return false;
     }
     VulkanRhiImpl& d = *impl_;
-    // #region agent log
-    static unsigned drawFrameLogN = 0;
-    ++drawFrameLogN;
-    bool const agentLogDrawFrame = drawFrameLogN <= 45;
-    if (agentLogDrawFrame) {
-        agentVulkanDbgLog(
-            "H2",
-            "VulkanRhi.cpp:drawFrame",
-            "enter",
-            static_cast<int>(draws.size()),
-            static_cast<int>(d.meshes.size()),
-            static_cast<int>(d.swapExtent.width),
-            static_cast<int>(d.swapExtent.height)
-        );
-    }
-    // #endregion
 
     if (window.consumeFramebufferResized()) {
         if (!recreateSwapchain(d, window)) {
             return false;
         }
     }
-
-    // Serialize the whole device for this frame so acquire → record → submit → present cannot race semaphores/fences.
-    // Replace with leaner sync once the swapchain path is stable on all target GPUs.
-    vkDeviceWaitIdle(d.device);
-    // #region agent log
-    if (agentLogDrawFrame) {
-        agentVulkanDbgLog("H8", "VulkanRhi.cpp:drawFrame", "post_device_idle", static_cast<int>(d.currentFrame), 0, 0, 0);
-    }
-    // #endregion
 
     vkWaitForFences(d.device, 1, &d.inFlightFences[d.currentFrame], VK_TRUE, UINT64_MAX);
 
@@ -1650,20 +1564,6 @@ bool VulkanRhi::drawFrame(
     if (acq != VK_SUCCESS && acq != VK_SUBOPTIMAL_KHR) {
         return false;
     }
-
-    // #region agent log
-    if (agentLogDrawFrame) {
-        agentVulkanDbgLog(
-            "H7",
-            "VulkanRhi.cpp:drawFrame",
-            "acq_img",
-            static_cast<int>(imageIndex),
-            static_cast<int>(d.renderFinishedSemaphores.size()),
-            static_cast<int>(d.currentFrame),
-            imageIndex < d.renderFinishedSemaphores.size() ? 1 : 0
-        );
-    }
-    // #endregion
 
     if (d.imagesInFlight[imageIndex] != VK_NULL_HANDLE) {
         vkWaitForFences(d.device, 1, &d.imagesInFlight[imageIndex], VK_TRUE, UINT64_MAX);
@@ -1722,43 +1622,9 @@ bool VulkanRhi::drawFrame(
 
     for (MeshDrawInstance const& dc : draws) {
         if (dc.meshIndex >= d.meshes.size()) {
-            // #region agent log
-            if (agentLogDrawFrame) {
-                agentVulkanDbgLog("H2", "VulkanRhi.cpp:drawFrame", "skip_oob", static_cast<int>(dc.meshIndex), static_cast<int>(d.meshes.size()), 0, 0);
-            }
-            // #endregion
             continue;
         }
         GpuMesh const& m = d.meshes[dc.meshIndex];
-        if (m.indexCount == 0 || m.vertexBuffer == VK_NULL_HANDLE || m.indexBuffer == VK_NULL_HANDLE) {
-            // #region agent log
-            if (agentLogDrawFrame) {
-                agentVulkanDbgLog(
-                    "H2",
-                    "VulkanRhi.cpp:drawFrame",
-                    "skip_bad_mesh",
-                    static_cast<int>(dc.meshIndex),
-                    static_cast<int>(m.indexCount),
-                    m.vertexBuffer != VK_NULL_HANDLE ? 1 : 0,
-                    m.indexBuffer != VK_NULL_HANDLE ? 1 : 0
-                );
-            }
-            // #endregion
-            continue;
-        }
-        // #region agent log
-        if (agentLogDrawFrame) {
-            agentVulkanDbgLog(
-                "H2",
-                "VulkanRhi.cpp:drawFrame",
-                "draw_ok",
-                static_cast<int>(dc.meshIndex),
-                static_cast<int>(m.indexCount),
-                static_cast<int>(dc.drawFlags),
-                0
-            );
-        }
-        // #endregion
         PushConstants pc{};
         std::memcpy(pc.model, dc.model.m, sizeof(pc.model));
         pc.color[0] = dc.color.x;
@@ -1766,7 +1632,7 @@ bool VulkanRhi::drawFrame(
         pc.color[2] = dc.color.z;
         pc.color[3] = dc.colorAlpha;
         pc.drawFlags = dc.drawFlags;
-        vkCmdPushConstants(cb, d.pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &pc);
+        vkCmdPushConstants(cb, d.pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pc);
         VkBuffer vb = m.vertexBuffer;
         VkDeviceSize off = 0;
         vkCmdBindVertexBuffers(cb, 0, 1, &vb, &off);
@@ -1787,7 +1653,7 @@ bool VulkanRhi::drawFrame(
             opc.color[2] = overlayTint->b;
             opc.color[3] = overlayTint->a;
             opc.drawFlags = marble::render::kPcFlagClipSpace;
-            vkCmdPushConstants(cb, d.pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &opc);
+            vkCmdPushConstants(cb, d.pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &opc);
             VkBuffer vb = qm.vertexBuffer;
             VkDeviceSize off = 0;
             vkCmdBindVertexBuffers(cb, 0, 1, &vb, &off);
@@ -1809,7 +1675,7 @@ bool VulkanRhi::drawFrame(
     si.commandBufferCount = 1;
     si.pCommandBuffers = &cb;
     si.signalSemaphoreCount = 1;
-    si.pSignalSemaphores = &d.renderFinishedSemaphores[imageIndex];
+    si.pSignalSemaphores = &d.renderFinishedSemaphores[d.currentFrame];
     if (vkQueueSubmit(d.graphicsQueue, 1, &si, d.inFlightFences[d.currentFrame]) != VK_SUCCESS) {
         return false;
     }
@@ -1817,7 +1683,7 @@ bool VulkanRhi::drawFrame(
     VkPresentInfoKHR pi{};
     pi.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     pi.waitSemaphoreCount = 1;
-    pi.pWaitSemaphores = &d.renderFinishedSemaphores[imageIndex];
+    pi.pWaitSemaphores = &d.renderFinishedSemaphores[d.currentFrame];
     pi.swapchainCount = 1;
     pi.pSwapchains = &d.swapchain;
     pi.pImageIndices = &imageIndex;

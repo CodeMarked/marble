@@ -118,6 +118,8 @@ PRIVATE
 
     marbles/main.cpp
 
+    marbles/MarbleApp.cpp
+
     marbles/MarblesGame.cpp
 
     garden/GardenGame.cpp

@@ -1,4 +1,4 @@
-#include "MarblesGame.hpp"
+#include "MarbleApp.hpp"
 
 #include "core/Engine.hpp"
 #include "core/Log.hpp"
@@ -18,9 +18,10 @@ int main(int argc, char** argv)
 
     constexpr LogChannelMask kGeneral = static_cast<LogChannelMask>(LogChannel::General);
 
-    (void)logPrintf(0, kGeneral, "Marble game starting");
+    (void)logPrintf(0, kGeneral, "Marble: unified launcher (windowed = main menu; --headless skips menu)");
 
     marble::core::Engine::Config config {};
+    config.appName = "Marble - launcher";
     config.resolveAssetsRoot = true;
     std::optional<std::uint32_t> physicalDeviceIndex;
     for (int i = 1; i < argc; ++i) {
@@ -73,27 +74,26 @@ int main(int argc, char** argv)
 
     marble::core::Engine engine(config);
 
-    int exitCode = 1;
+    if (!engine.init()) {
+        (void)logPrintf(0, kGeneral, "Failed to initialize engine");
+        return 1;
+    }
+
+    int exitCode = 0;
     {
-        marble::marbles::MarblesGame game(engine);
-        game.installPhases();
+        std::filesystem::path const exeDir = marble::platform::executableDirectory();
+        std::string const shaderDir = (exeDir / "shaders").string();
 
-        if (!engine.init()) {
-            (void)logPrintf(0, kGeneral, "Failed to initialize engine");
-            return 1;
+        if (config.headless) {
+            exitCode = marble::marbles_app::runGameplaySession(
+                engine,
+                marble::marbles_app::PostLandingAction::Marbles,
+                shaderDir,
+                physicalDeviceIndex
+            );
+        } else {
+            exitCode = marble::marbles_app::runWindowedGameLoop(engine, shaderDir, physicalDeviceIndex);
         }
-
-        if (!config.headless) {
-            std::filesystem::path const exeDir = marble::platform::executableDirectory();
-            std::string const shaderDir = (exeDir / "shaders").string();
-            if (!game.initGraphics(shaderDir, physicalDeviceIndex)) {
-                (void)logPrintf(0, kGeneral, "Failed to initialize Vulkan (check shaders next to exe: shaders/mesh.*.spv)");
-                engine.shutdown();
-                return 1;
-            }
-        }
-
-        exitCode = engine.run();
     }
 
     engine.shutdown();

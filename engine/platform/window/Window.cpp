@@ -168,6 +168,9 @@ bool Window::isKeyDown(Key key) const {
     case Key::E:
         glfwKey = GLFW_KEY_E;
         break;
+    case Key::C:
+        glfwKey = GLFW_KEY_C;
+        break;
     case Key::R:
         glfwKey = GLFW_KEY_R;
         break;

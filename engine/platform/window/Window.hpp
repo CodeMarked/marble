@@ -32,6 +32,7 @@ enum class Key : int {
     LeftControl,
     Q,
     E,
+    C,
     R,
     T,
     O,

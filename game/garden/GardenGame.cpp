@@ -79,7 +79,7 @@ using marble::render::IRenderBackend;
 using marble::render::MeshDrawInstance;
 using marble::render::VulkanRhi;
 
-/// Escape / gamepad Back: toggles pause. While paused: Q or gamepad B returns to app main menu.
+/// Esc / Back toggles pause. While paused, Q returns to the app menu (not during live play).
 static constexpr LogicalActionId kActionPauseMenu = 1;
 
 static constexpr ActionContextEntry kGameplayContext[] = {
@@ -983,32 +983,6 @@ void worldRayFromWindowPixel(
     return bottom <= ty + 0.36f;
 }
 
-/// Geometry-only: close to terrain under the ball. Used to arm landing grace even when vy is upward from restitution
-/// (gardenBallOnGround would stay false, so jump release would never get a grace window).
-[[nodiscard]] bool gardenBallNearTerrain(GardenLayout const& layout, RigidBodyKinematics const& ball, float radius) noexcept {
-    if (ball.invMass <= 0.f) {
-        return false;
-    }
-    float const ty = gardenTerrainHeightAt(layout.terrain, ball.position.x, ball.position.z);
-    float const bottom = ball.position.y - radius;
-    return bottom <= ty + 0.36f;
-}
-
-/// Wider shell above contact: "about to touch" for pre-landing jump grace while falling.
-[[nodiscard]] bool gardenBallApproachTerrain(
-    GardenLayout const& layout,
-    RigidBodyKinematics const& ball,
-    float radius,
-    float extraAboveContact
-) noexcept {
-    if (ball.invMass <= 0.f) {
-        return false;
-    }
-    float const ty = gardenTerrainHeightAt(layout.terrain, ball.position.x, ball.position.z);
-    float const bottom = ball.position.y - radius;
-    return bottom <= ty + 0.36f + std::max(0.f, extraAboveContact);
-}
-
 /// Easing for jump charge → impulse: shallow near 0 and 1, steepest growth ~70% charge (cubic bezier in t).
 [[nodiscard]] float jumpImpulseEase(float t) noexcept {
     t = std::clamp(t, 0.f, 1.f);
@@ -1037,96 +1011,6 @@ void worldRayFromWindowPixel(
     float const u = 0.5f * (lo + hi);
     return bezierY(u);
 }
-
-/// Charged hop + pre/post landing grace + compression “squish” scaling release impulse.
-/// Keeps terrain queries and timers in one place so `GardenGame::step` stays shallow.
-struct GardenPlayerJump final {
-    void reset() noexcept {
-        chargeSec_ = 0.f;
-        jumpWasHeld_ = false;
-        wasNearTerrain_ = false;
-        preLandGraceSec_ = 0.f;
-        postLandGraceSec_ = 0.f;
-        squishAccum_ = 0.f;
-    }
-
-    void step(
-        GardenLayout const& layout,
-        RigidBodyKinematics& marble,
-        float marbleRadius,
-        bool jumpHeld,
-        float deltaSec
-    ) noexcept {
-        bool const grounded = gardenBallOnGround(layout, marble, marbleRadius);
-        bool const nearTerrain = gardenBallNearTerrain(layout, marble, marbleRadius);
-        float const vy = marble.linearVelocity.y;
-
-        bool const approachTerrain =
-            gardenBallApproachTerrain(layout, marble, marbleRadius, kApproachAboveContact);
-        if (approachTerrain && vy < kApproachFallVy) {
-            preLandGraceSec_ = kPreLandJumpGrace;
-        } else {
-            preLandGraceSec_ = std::max(0.f, preLandGraceSec_ - deltaSec);
-        }
-
-        if (nearTerrain && !wasNearTerrain_) {
-            postLandGraceSec_ = kPostLandJumpGrace;
-        }
-        postLandGraceSec_ = std::max(0.f, postLandGraceSec_ - deltaSec);
-
-        bool const effectiveReleaseGround =
-            grounded || preLandGraceSec_ > 1e-5f || postLandGraceSec_ > 1e-5f;
-        bool const compressContact =
-            grounded || nearTerrain || postLandGraceSec_ > 1e-5f;
-
-        if (jumpHeld) {
-            chargeSec_ += deltaSec;
-            chargeSec_ = std::min(chargeSec_, kJumpChargeMaxSec);
-        } else {
-            if (jumpWasHeld_ && marble.invMass > 0.f && chargeSec_ > 1e-4f && effectiveReleaseGround) {
-                float const t = std::clamp(chargeSec_ / kJumpChargeMaxSec, 0.f, 1.f);
-                float const s = jumpImpulseEase(t);
-                float const baseImp = kJumpImpulseMin + (kJumpImpulseMax - kJumpImpulseMin) * s;
-                float const squishNorm = std::clamp(squishAccum_, 0.f, 1.f);
-                float const mult = 1.f + kSquishBonusMax * squishNorm;
-                applyImpulseLinear(marble, Vec3{0.f, baseImp * mult, 0.f});
-            }
-            chargeSec_ = 0.f;
-            squishAccum_ = 0.f;
-        }
-
-        if (jumpHeld && compressContact && marble.invMass > 0.f && vy <= kSpringMaxUpVy) {
-            float const tSpring = std::clamp(chargeSec_ / kJumpChargeMaxSec, 0.f, 1.f);
-            float const compressShape = tSpring * tSpring;
-            float const compressImpulse = kSpringCompressPerSec * compressShape * deltaSec;
-            applyImpulseLinear(marble, Vec3{0.f, -compressImpulse, 0.f});
-            squishAccum_ = std::min(1.f, squishAccum_ + kSquishFromImpulseScale * compressImpulse);
-        }
-
-        jumpWasHeld_ = jumpHeld;
-        wasNearTerrain_ = nearTerrain;
-    }
-
-private:
-    static constexpr float kApproachAboveContact = 0.95f;
-    static constexpr float kPreLandJumpGrace = 0.38f;
-    static constexpr float kPostLandJumpGrace = 0.16f;
-    static constexpr float kApproachFallVy = -0.12f;
-    static constexpr float kJumpChargeMaxSec = 0.42f;
-    static constexpr float kJumpImpulseMin = 1.55f;
-    static constexpr float kJumpImpulseMax = 4.85f;
-    static constexpr float kSpringCompressPerSec = 3.5f;
-    static constexpr float kSpringMaxUpVy = 0.28f;
-    static constexpr float kSquishFromImpulseScale = 0.22f;
-    static constexpr float kSquishBonusMax = 0.95f;
-
-    float chargeSec_ = 0.f;
-    bool jumpWasHeld_ = false;
-    bool wasNearTerrain_ = false;
-    float preLandGraceSec_ = 0.f;
-    float postLandGraceSec_ = 0.f;
-    float squishAccum_ = 0.f;
-};
 
 void applyLawnStrokeImpulse(
     RigidBodyKinematics& marble,
@@ -1223,7 +1107,9 @@ struct GardenGame::State final {
     Vec3 padPLast{};
     Vec3 padPPrev{};
 
-    GardenPlayerJump playerJump_{};
+    /// Accumulated seconds while jump input held on ground (capped); consumed on release.
+    float jumpChargeSec_ = 0.f;
+    bool jumpWasHeld_ = false;
 
     std::vector<MeshDrawInstance> drawScratch{};
     InputRemapTable inputRemap_{};
@@ -1326,7 +1212,8 @@ struct GardenGame::State final {
         padFlickArmed = false;
         strokeEmaValid = false;
         padStrokeEmaValid = false;
-        playerJump_.reset();
+        jumpChargeSec_ = 0.f;
+        jumpWasHeld_ = false;
         paused = false;
         pausePanel = PausePanel::Main;
     }
@@ -1360,10 +1247,6 @@ struct GardenGame::State final {
                 if (anyStandardGamepadPresent() && oDown && !menuOWasDown) {
                     pausePanel = (pausePanel == PausePanel::Options) ? PausePanel::Main : PausePanel::Options;
                 }
-                bool const qDown = w->isKeyDown(Key::Q);
-                if (marble::game_shared::pauseMenuReturnToMainMenuQEdge(qDown, menuQWasDown)) {
-                    engine.requestEndRun();
-                }
                 menuRWasDown = rDown;
                 menuOWasDown = oDown;
 
@@ -1371,19 +1254,20 @@ struct GardenGame::State final {
                 std::size_t const iPadX = static_cast<std::size_t>(AbstractControl::RPadLeft);
                 std::size_t const iPadB = static_cast<std::size_t>(AbstractControl::RPadRight);
                 std::size_t const iPadY = static_cast<std::size_t>(AbstractControl::RPadUp);
+                bool const qDown = w->isKeyDown(Key::Q);
                 bool const aDown = controlScratch_[iPadA] >= 0.5f;
                 bool const xDown = controlScratch_[iPadX] >= 0.5f;
                 bool const bDown = controlScratch_[iPadB] >= 0.5f;
                 bool const yDown = controlScratch_[iPadY] >= 0.5f;
+                if (marble::game_shared::pauseMenuWantsReturnToLauncher(qDown, bDown, menuQWasDown, padMenuBWasDown)) {
+                    engine.requestEndRun();
+                }
                 if (aDown && !padMenuAWasDown) {
                     paused = false;
                     pausePanel = PausePanel::Main;
                 }
                 if (xDown && !padMenuXWasDown) {
                     restartGarden();
-                }
-                if (marble::game_shared::pauseMenuReturnToMainMenuPadBEdge(bDown, padMenuBWasDown)) {
-                    engine.requestEndRun();
                 }
                 if (anyStandardGamepadPresent() && yDown && !padMenuYWasDown) {
                     pausePanel = (pausePanel == PausePanel::Options) ? PausePanel::Main : PausePanel::Options;
@@ -1404,11 +1288,14 @@ struct GardenGame::State final {
                 menuRWasDown = w->isKeyDown(Key::R);
                 menuTWasDown = w->isKeyDown(Key::T);
                 menuOWasDown = w->isKeyDown(Key::O);
-                menuQWasDown = w->isKeyDown(Key::Q);
                 padMenuAWasDown = controlScratch_[static_cast<std::size_t>(AbstractControl::RPadDown)] >= 0.5f;
                 padMenuXWasDown = controlScratch_[static_cast<std::size_t>(AbstractControl::RPadLeft)] >= 0.5f;
-                padMenuBWasDown = controlScratch_[static_cast<std::size_t>(AbstractControl::RPadRight)] >= 0.5f;
                 padMenuYWasDown = controlScratch_[static_cast<std::size_t>(AbstractControl::RPadUp)] >= 0.5f;
+                marble::game_shared::syncPauseMenuReturnEdgeState(
+                    w->isKeyDown(Key::Q),
+                    controlScratch_[static_cast<std::size_t>(AbstractControl::RPadRight)] >= 0.5f,
+                    menuQWasDown,
+                    padMenuBWasDown);
 
             std::size_t const iLt = static_cast<std::size_t>(AbstractControl::LTrigger);
             std::size_t const iRt = static_cast<std::size_t>(AbstractControl::RTrigger);
@@ -1448,7 +1335,7 @@ struct GardenGame::State final {
             if (w->isKeyDown(Key::E)) {
                 camHeightTarget += 0.95f * h;
             }
-            if (w->isKeyDown(Key::Q)) {
+            if (w->isKeyDown(Key::C)) {
                 camHeightTarget -= 0.95f * h;
             }
             camHeightTarget = std::clamp(camHeightTarget, 0.15f, 1.4f);
@@ -1507,7 +1394,24 @@ struct GardenGame::State final {
             std::size_t const iPadA = static_cast<std::size_t>(AbstractControl::RPadDown);
             bool const padJumpDown = controlScratch_[iPadA] >= 0.5f;
             bool const jumpHeld = spaceDown || padJumpDown;
-            playerJump_.step(layout, marbles[0], kMarbleRadius, jumpHeld, h);
+            bool const groundedForJump = gardenBallOnGround(layout, marbles[0], kMarbleRadius);
+            constexpr float kJumpChargeMaxSec = 0.42f;
+            constexpr float kJumpImpulseMin = 1.55f;
+            constexpr float kJumpImpulseMax = 4.85f;
+            // Charge builds whenever jump is held (air or ground); impulse only on release if grounded.
+            if (jumpHeld) {
+                jumpChargeSec_ += h;
+                jumpChargeSec_ = std::min(jumpChargeSec_, kJumpChargeMaxSec);
+            } else {
+                if (jumpWasHeld_ && marbles[0].invMass > 0.f && jumpChargeSec_ > 1e-4f && groundedForJump) {
+                    float const t = std::clamp(jumpChargeSec_ / kJumpChargeMaxSec, 0.f, 1.f);
+                    float const s = jumpImpulseEase(t);
+                    float const imp = kJumpImpulseMin + (kJumpImpulseMax - kJumpImpulseMin) * s;
+                    applyImpulseLinear(marbles[0], Vec3{0.f, imp, 0.f});
+                }
+                jumpChargeSec_ = 0.f;
+            }
+            jumpWasHeld_ = jumpHeld;
 
             int fbW = 1, fbH = 1;
             w->getFramebufferSize(&fbW, &fbH);
@@ -1692,39 +1596,23 @@ struct GardenGame::State final {
 
         if (auto* w = engine.window()) {
             char buf[256];
-            bool const hasPad = anyStandardGamepadPresent();
             if (paused) {
-                if (pausePanel == PausePanel::Options && hasPad) {
+                if (pausePanel == PausePanel::Options) {
                     (void)std::snprintf(
                         buf,
                         sizeof(buf),
-                        "PAUSED — Options (coming soon) — Esc resume  O back  R restart  Q exit  | A resume Y back X restart B exit"
-                    );
-                } else if (hasPad) {
-                    (void)std::snprintf(
-                        buf,
-                        sizeof(buf),
-                        "PAUSED — Esc resume  R restart  O options  Q exit  | gamepad A resume X restart Y options B exit"
-                    );
+                        "Garden — Paused — Options — Esc · O back · R · Q menu");
                 } else {
                     (void)std::snprintf(
                         buf,
                         sizeof(buf),
-                        "PAUSED — Esc resume  R restart  Q main menu"
-                    );
+                        "Garden — Paused — Esc resume · O options · R restart · Q menu");
                 }
-            } else if (hasPad) {
-                (void)std::snprintf(
-                    buf,
-                    sizeof(buf),
-                    "Garden — Esc pause | cam arrows/R-stick | roll WASD/L-stick | jump Space/A: charge in air, compress near landing, release — squish boosts hop | Q/E | flick RB+R-stick"
-                );
             } else {
                 (void)std::snprintf(
                     buf,
                     sizeof(buf),
-                    "Garden — Esc pause | cam arrows | roll WASD | jump Space: charge in air, compress near landing, release — squish boosts hop | Q/E | LMB flick"
-                );
+                    "Garden — Esc · WASD roll · arrows camera · Space jump · E/C height · click flick");
             }
             w->setTitle(buf);
         }

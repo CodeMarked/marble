@@ -33,7 +33,7 @@ Engine, game, and tests inherit shared flags from [`cmake/MarbleCompileOptions.c
 - **Debug:** `build\vs-debug\game\Debug\marbles.exe`
 - **Release:** `build\vs-release\game\Release\marbles.exe`
 
-Run **`marbles.exe`** from those folders. There is no separate **`garden.exe`**; Garden code is linked into the same binary for tests and future entry points.
+Run **`marbles.exe`** from those folders (there is no separate `garden.exe`). The window title should start as **Marble - launcher**, then switch to **Marble - main menu** once the landing UI is up. If you never see the menu: you may be on an old binary (rebuild the **marbles** target), running **`--headless`** (that path goes straight into Marbles gameplay), or launching a different exe (for example a test) from Visual Studio.
 
 Optional: run without a window for a short time (good for quick checks):
 

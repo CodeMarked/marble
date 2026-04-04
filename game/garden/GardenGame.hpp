@@ -8,7 +8,7 @@
 
 namespace marble::garden_app {
 
-/// Phase-1 sample: fixed-step garden physics, two marbles, third-person camera, mouse flick + gamepad charge.
+/// Phase-1 sample: fixed-step garden physics, two marbles, third-person camera, mouse flick.
 class GardenGame {
 public:
     struct State;
