@@ -1,0 +1,64 @@
+#pragma once
+
+#include "math/Geometry.hpp"
+#include "math/Vec3.hpp"
+
+#include <cstdint>
+#include <span>
+
+namespace marble::physics {
+
+/// Opaque handle for a body in a middleware [`IPhysicsScene`](IPhysicsScene.hpp). `0` is invalid.
+using PhysicsBodyId = std::uint32_t;
+
+inline constexpr PhysicsBodyId kInvalidPhysicsBodyId = 0;
+
+/// Contact and motion damping for static or dynamic bodies (middleware backends map to their material model).
+struct PhysicsBodyMaterial {
+    float restitution = 0.3f;
+    float friction = 0.55f;
+    float linearDamping = 0.02f;
+    float angularDamping = 0.1f;
+};
+
+/// Axis-aligned box at rest in world space (center derived from `bounds`).
+struct PhysicsStaticBoxDesc {
+    math::Aabb bounds{};
+    PhysicsBodyMaterial material{};
+};
+
+/// Static heightfield: Jolt surface `offset + scale * (ix, height[ix,iz], iz)` with `ix,iz ∈ [0, sampleCount-1]`.
+/// `heights` is row-major `iz * sampleCount + ix`, length `sampleCount²`.
+struct PhysicsStaticHeightFieldDesc {
+    math::Vec3 offset{};
+    math::Vec3 scale{1.f, 1.f, 1.f};
+    std::uint32_t sampleCount{};
+    std::span<float const> heights{};
+    PhysicsBodyMaterial material{};
+};
+
+/// Dynamic sphere with game-authored pose and mass.
+struct PhysicsDynamicSphereDesc {
+    math::Vec3 center{};
+    math::Vec3 linearVelocity{};
+    float radius = 0.11f;
+    float invMass = 1.f;
+    PhysicsBodyMaterial material{};
+};
+
+/// Optional horizontal cylinder about +Y through the origin: clamps body **center** after the solver (gameplay bounds).
+struct PhysicsCylindricalXZClamp {
+    /// Max allowed horizontal distance `sqrt(x*x + z*z)` for the body center (meters).
+    float maxHorizontalRadiusFromYAxis = 0.f;
+    /// Minimum world `y` for the body center (meters).
+    float minCenterY = 0.f;
+};
+
+/// Per-step options (post-step clamps, future: debug draw hooks). Stage B may add query flags.
+struct PhysicsStepOptions {
+    /// When non-null and `clampBodyIds` is non-empty, listed bodies are clamped in Jolt after `Update`.
+    PhysicsCylindricalXZClamp const* postStepCylindricalClamp = nullptr;
+    std::span<PhysicsBodyId const> clampBodyIds{};
+};
+
+} // namespace marble::physics

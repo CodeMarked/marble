@@ -1,32 +1,68 @@
-name: Build
+name: Build and Test
 
 on:
   push:
   pull_request:
 
 jobs:
-
-  build:
-
+  build-and-test:
     runs-on: windows-latest
 
     steps:
 
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
 
     - name: Setup CMake
       uses: lukka/get-cmake@latest
 
-    - name: Setup vcpkg and install Vulkan
-      run: |
-        git clone https://github.com/microsoft/vcpkg.git --depth 1
-        .\vcpkg\bootstrap-vcpkg.bat
-        .\vcpkg\vcpkg install vulkan-headers vulkan-loader:x64-windows
+    - name: Clone vcpkg
+      run: git clone https://github.com/microsoft/vcpkg.git --depth 1
 
-    - name: Configure
+    - name: Bootstrap vcpkg
+      run: .\vcpkg\bootstrap-vcpkg.bat
+
+    - name: Cache vcpkg (installed + downloads)
+      uses: actions/cache@v4
+      id: vcpkg-cache
+      with:
+        path: |
+          vcpkg/installed
+          vcpkg/downloads
+        key: vcpkg-${{ runner.os }}-x64-windows-${{ hashFiles('.github/workflows/build.yml') }}
+        restore-keys: |
+          vcpkg-${{ runner.os }}-x64-windows-
+
+    - name: Install Vulkan + shaderc
+      run: .\vcpkg\vcpkg install vulkan-headers vulkan-loader shaderc:x64-windows
+
+    - name: Add glslc to PATH
+      shell: pwsh
+      run: |
+        $glslcDir = Join-Path $env:GITHUB_WORKSPACE 'vcpkg\installed\x64-windows\tools\shaderc'
+        if (-not (Test-Path (Join-Path $glslcDir 'glslc.exe'))) {
+          Write-Error "glslc.exe not found under $glslcDir"
+          exit 1
+        }
+        Add-Content -Path $env:GITHUB_PATH -Value $glslcDir
+
+    - name: Configure (Debug)
       run: |
         $tc = Join-Path $env:GITHUB_WORKSPACE "vcpkg\scripts\buildsystems\vcpkg.cmake"
-        cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE="$tc"
+        cmake --preset debug -DCMAKE_TOOLCHAIN_FILE="$tc"
 
-    - name: Build
-      run: cmake --build build
+    - name: Build (Debug)
+      run: cmake --build --preset build-debug
+
+    - name: Test (Debug)
+      run: ctest --preset test-debug
+
+    - name: Configure (Release)
+      run: |
+        $tc = Join-Path $env:GITHUB_WORKSPACE "vcpkg\scripts\buildsystems\vcpkg.cmake"
+        cmake --preset release -DCMAKE_TOOLCHAIN_FILE="$tc"
+
+    - name: Build (Release)
+      run: cmake --build --preset build-release
+
+    - name: Test (Release)
+      run: ctest --preset test-release
