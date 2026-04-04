@@ -7,6 +7,40 @@
 
 namespace marble::platform {
 
+/// Virtual key codes for `isKeyDown` (mapped from GLFW in the implementation).
+/// Mouse buttons for polling after `pollEvents` (GLFW convention).
+enum class MouseButton : int {
+    Left = 0,
+    Right = 1,
+    Middle = 2,
+};
+
+enum class Key : int {
+    W,
+    A,
+    S,
+    D,
+    Left,
+    Right,
+    Up,
+    Down,
+    Space,
+    Escape,
+    Enter,
+    Tab,
+    LeftShift,
+    LeftControl,
+    Q,
+    E,
+    C,
+    R,
+    T,
+    O,
+    F,
+    Digit1,
+    Digit2,
+};
+
 /// Cross-platform window abstraction.
 /// Isolates GLFW from the rest of the engine; no GLFW types appear in this header.
 class Window {
@@ -30,6 +64,27 @@ public:
 
     /// Framebuffer size (may differ from width/height on HiDPI). Use for Vulkan swapchain.
     void getFramebufferSize(int* outWidth, int* outHeight) const;
+
+    /// True once after the framebuffer size changes (e.g. window resize). Cleared when read.
+    bool consumeFramebufferResized();
+
+    /// Whether `key` is currently held (edge polling; call after `pollEvents` each frame).
+    bool isKeyDown(Key key) const;
+
+    /// Cursor position in **window coordinates** (origin top-left). Returns false if unavailable.
+    bool getCursorPos(double& outX, double& outY) const;
+
+    /// Whether `button` is currently pressed (call after `pollEvents`).
+    bool isMouseButtonDown(MouseButton button) const;
+
+    /// Update the window title (e.g. score / timer HUD).
+    void setTitle(const std::string& title);
+
+    /// Request close on the next frame (`shouldClose()` becomes true).
+    void requestClose();
+
+    /// Used by the platform framebuffer callback (sets `consumeFramebufferResized`).
+    void markFramebufferResized();
 
     /// Create a VkSurfaceKHR for this window. Caller must destroy the surface with vkDestroySurfaceKHR.
     /// Returns true on success.
