@@ -15,11 +15,25 @@ jobs:
     - name: Setup CMake
       uses: lukka/get-cmake@latest
 
-    - name: Setup vcpkg and install Vulkan + glslc
-      run: |
-        git clone https://github.com/microsoft/vcpkg.git --depth 1
-        .\vcpkg\bootstrap-vcpkg.bat
-        .\vcpkg\vcpkg install vulkan-headers vulkan-loader shaderc:x64-windows
+    - name: Clone vcpkg
+      run: git clone https://github.com/microsoft/vcpkg.git --depth 1
+
+    - name: Bootstrap vcpkg
+      run: .\vcpkg\bootstrap-vcpkg.bat
+
+    - name: Cache vcpkg (installed + downloads)
+      uses: actions/cache@v4
+      id: vcpkg-cache
+      with:
+        path: |
+          vcpkg/installed
+          vcpkg/downloads
+        key: vcpkg-${{ runner.os }}-x64-windows-${{ hashFiles('.github/workflows/build.yml') }}
+        restore-keys: |
+          vcpkg-${{ runner.os }}-x64-windows-
+
+    - name: Install Vulkan + shaderc
+      run: .\vcpkg\vcpkg install vulkan-headers vulkan-loader shaderc:x64-windows
 
     - name: Add glslc to PATH
       shell: pwsh
