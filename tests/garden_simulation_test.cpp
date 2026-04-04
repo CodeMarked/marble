@@ -1,4 +1,5 @@
 #include "garden/GardenSimulation.hpp"
+#include "gameplay/SimulationIsland.hpp"
 #include "physics/IPhysicsScene.hpp"
 #include "physics/MiddlewarePhysicsTypes.hpp"
 #include "physics/PhysicsIntegration.hpp"
@@ -10,6 +11,10 @@
 
 namespace {
 
+using marble::gameplay::SimulationIsland;
+using marble::gameplay::localGameplayAabbToJolt;
+using marble::gameplay::localGameplayHeightFieldToJolt;
+using marble::gameplay::localGameplayToJolt;
 using marble::garden::GardenLayout;
 using marble::garden::buildGardenLayout;
 using marble::garden::kGardenRadius;
@@ -32,7 +37,8 @@ void rebuildGardenPhysicsScene(
     marble::physics::IPhysicsScene& scene,
     GardenLayout const& layout,
     std::array<RigidBodyKinematics, 2>& marbles,
-    std::array<marble::physics::PhysicsBodyId, 2>& marbleBodyIds
+    std::array<marble::physics::PhysicsBodyId, 2>& marbleBodyIds,
+    SimulationIsland const& island
 ) {
     scene.clear();
     PhysicsBodyMaterial staticMat{};
@@ -46,11 +52,12 @@ void rebuildGardenPhysicsScene(
         hf.sampleCount = tr.sampleCount;
         hf.heights = std::span<float const>(tr.heights.data(), tr.heights.size());
         hf.material = staticMat;
-        (void)scene.addStaticHeightField(hf);
+        PhysicsStaticHeightFieldDesc const hfJ = localGameplayHeightFieldToJolt(island, hf);
+        (void)scene.addStaticHeightField(hfJ);
     }
     for (auto const& box : layout.staticColliders) {
         PhysicsStaticBoxDesc d{};
-        d.bounds = box;
+        d.bounds = localGameplayAabbToJolt(island, box);
         d.material = staticMat;
         (void)scene.addStaticBox(d);
     }
@@ -61,7 +68,7 @@ void rebuildGardenPhysicsScene(
     marbleMat.angularDamping = 0.10f;
     for (std::size_t i = 0; i < marbles.size(); ++i) {
         PhysicsDynamicSphereDesc sd{};
-        sd.center = marbles[i].position;
+        sd.center = localGameplayToJolt(island, marbles[i].position);
         sd.linearVelocity = marbles[i].linearVelocity;
         sd.radius = kMarbleRadius;
         sd.invMass = marbles[i].invMass;
@@ -119,34 +126,61 @@ int main() {
         return 6;
     }
 
-    std::array<RigidBodyKinematics, 2> marbles{};
-    placeMarblesInArena(marbles, layout);
     SimplePhysicsWorld world{};
     world.setSettings({.gravity = {0.f, -9.81f, 0.f}, .maxSubSteps = 1u});
-    auto scene = createJoltPhysicsScene();
-    std::array<marble::physics::PhysicsBodyId, 2> marbleBodyIds{};
-    rebuildGardenPhysicsScene(*scene, layout, marbles, marbleBodyIds);
-
     constexpr float dt = 1.f / 60.f;
     float const minCenterY = layout.terrain.minHeight - kMarbleRadius - 0.55f;
     PhysicsCylindricalXZClamp const clamp{
         kGardenRadius - kMarbleRadius - 0.02f,
         minCenterY,
     };
-    PhysicsStepOptions const stepOpts{&clamp, std::span(marbleBodyIds)};
-    for (int i = 0; i < 480; ++i) {
-        scene->syncHostVelocitiesBeforeStep(marbleBodyIds, marbles.data(), marbles.size());
-        scene->step(dt, world.settings(), stepOpts);
-        scene->readBackKinematics(marbleBodyIds, marbles.data(), marbles.size());
+
+    auto runWithIsland = [&](SimulationIsland const& island, std::array<RigidBodyKinematics, 2>& marblesOut) -> int {
+        placeMarblesInArena(marblesOut, layout);
+        auto scene = createJoltPhysicsScene();
+        std::array<marble::physics::PhysicsBodyId, 2> marbleBodyIds{};
+        rebuildGardenPhysicsScene(*scene, layout, marblesOut, marbleBodyIds, island);
+        PhysicsStepOptions const stepOpts{&clamp, std::span(marbleBodyIds)};
+        for (int i = 0; i < 480; ++i) {
+            scene->syncHostVelocitiesBeforeStep(marbleBodyIds, marblesOut.data(), marblesOut.size());
+            scene->step(dt, world.settings(), stepOpts);
+            scene->readBackKinematics(marbleBodyIds, marblesOut.data(), marblesOut.size());
+        }
+        for (auto const& m : marblesOut) {
+            float const xz = std::sqrt(m.position.x * m.position.x + m.position.z * m.position.z);
+            if (xz > kGardenRadius + 0.05f) {
+                return 3;
+            }
+            if (m.position.y < layout.terrain.minHeight - 20.f || m.position.y > layout.terrain.maxHeight + 70.f) {
+                return 4;
+            }
+            if (m.position.x != m.position.x || m.linearVelocity.x != m.linearVelocity.x) {
+                return 10;
+            }
+        }
+        return 0;
+    };
+
+    std::array<RigidBodyKinematics, 2> marblesRef{};
+    int const rc0 = runWithIsland(SimulationIsland{}, marblesRef);
+    if (rc0 != 0) {
+        return rc0;
     }
 
-    for (auto const& m : marbles) {
-        float const xz = std::sqrt(m.position.x * m.position.x + m.position.z * m.position.z);
-        if (xz > kGardenRadius + 0.05f) {
-            return 3;
-        }
-        if (m.position.y < layout.terrain.minHeight - 20.f || m.position.y > layout.terrain.maxHeight + 70.f) {
-            return 4;
+    std::array<RigidBodyKinematics, 2> marblesBig{};
+    SimulationIsland const bigIsland{1.0e6, 0.0, 1.0e6};
+    int const rc1 = runWithIsland(bigIsland, marblesBig);
+    if (rc1 != 0) {
+        return rc1;
+    }
+
+    for (std::size_t i = 0; i < marblesRef.size(); ++i) {
+        float const dx = marblesRef[i].position.x - marblesBig[i].position.x;
+        float const dy = marblesRef[i].position.y - marblesBig[i].position.y;
+        float const dz = marblesRef[i].position.z - marblesBig[i].position.z;
+        float const err = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (err > 0.05f) {
+            return 11;
         }
     }
 

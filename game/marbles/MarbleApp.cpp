@@ -98,7 +98,7 @@ struct LandingState {
             idx
         );
         marble::ui::appendEasyFontTextPx(
-            "Choose Marbles or Garden.",
+            "Choose Marbles, Garden, or Garden listen host (no network yet).",
             48.f,
             80.f,
             fbW,
@@ -147,9 +147,21 @@ struct LandingState {
             idx
         );
         marble::ui::appendEasyFontTextPx(
-            "Load game",
+            "Garden - listen host (dev)",
             56.f,
             static_cast<float>(kMenuRowBaseY + 2 * kMenuRowStep),
+            fbW,
+            fbH,
+            0.72f,
+            0.85f,
+            0.78f,
+            vtx,
+            idx
+        );
+        marble::ui::appendEasyFontTextPx(
+            "Load game",
+            56.f,
+            static_cast<float>(kMenuRowBaseY + 3 * kMenuRowStep),
             fbW,
             fbH,
             0.7f,
@@ -161,7 +173,7 @@ struct LandingState {
         marble::ui::appendEasyFontTextPx(
             "Quit",
             56.f,
-            static_cast<float>(kMenuRowBaseY + 3 * kMenuRowStep),
+            static_cast<float>(kMenuRowBaseY + 4 * kMenuRowStep),
             fbW,
             fbH,
             0.75f,
@@ -222,11 +234,11 @@ struct LandingState {
             prevEsc = esc;
         } else {
             if (up && !prevUp) {
-                selection = (selection + 3) % 4;
+                selection = (selection + 4) % 5;
                 meshDirty = true;
             }
             if (down && !prevDown) {
-                selection = (selection + 1) % 4;
+                selection = (selection + 1) % 5;
                 meshDirty = true;
             }
             if (enter && !prevEnter) {
@@ -237,6 +249,9 @@ struct LandingState {
                     outcome = PostLandingAction::Garden;
                     engine.requestEndRun();
                 } else if (selection == 2) {
+                    outcome = PostLandingAction::GardenListenHost;
+                    engine.requestEndRun();
+                } else if (selection == 3) {
                     statusLine = "Load game: coming soon.";
                     meshDirty = true;
                 } else {
@@ -425,7 +440,10 @@ int runGameplaySession(
         }
         return engine.run();
     }
-    marble::garden_app::GardenGame game(engine);
+    using marble::garden_app::GardenSessionKind;
+    GardenSessionKind const gardenSession =
+        (mode == PostLandingAction::GardenListenHost) ? GardenSessionKind::ListenHost : GardenSessionKind::Offline;
+    marble::garden_app::GardenGame game(engine, gardenSession);
     game.installPhases();
     if (engine.window() != nullptr) {
         if (!game.initGraphics(shaderDirectory, physicalDeviceIndex)) {

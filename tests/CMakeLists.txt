@@ -380,6 +380,20 @@ add_test(
     COMMAND irender_backend_test
 )
 
+add_executable(simulation_island_test
+    simulation_island_test.cpp
+)
+
+target_link_libraries(simulation_island_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME simulation_island_test
+    COMMAND simulation_island_test
+)
+
 add_executable(garden_simulation_test
     garden_simulation_test.cpp
 )

@@ -11,6 +11,8 @@
 #include "math/Geometry.hpp"
 #include "math/Mat4.hpp"
 #include "math/Vec3.hpp"
+#include "gameplay/OnlineMultiplayerFoundation.hpp"
+#include "gameplay/SimulationIsland.hpp"
 #include "physics/PhysicsIntegration.hpp"
 #include "physics/RigidBodyDynamics.hpp"
 #include "platform/window/Window.hpp"
@@ -72,6 +74,14 @@ using marble::physics::IPhysicsWorld;
 using marble::physics::SimplePhysicsWorld;
 using marble::physics::createJoltPhysicsScene;
 using marble::physics::applyImpulseLinear;
+using marble::gameplay::AuthorityRoster;
+using marble::gameplay::MultiplayerMode;
+using marble::gameplay::SessionConfig;
+using marble::gameplay::SimulationIsland;
+using marble::gameplay::isValid;
+using marble::gameplay::localGameplayAabbToJolt;
+using marble::gameplay::localGameplayHeightFieldToJolt;
+using marble::gameplay::localGameplayToJolt;
 using marble::platform::Key;
 using marble::platform::MouseButton;
 using marble::render::FrameOverlayTint;
@@ -1077,6 +1087,11 @@ struct GardenGame::State final {
     std::unique_ptr<marble::physics::IPhysicsScene> physicsScene_{createJoltPhysicsScene()};
     std::array<marble::physics::PhysicsBodyId, 2> marbleBodyIds_{};
 
+    SimulationIsland island_{};
+    SessionConfig sessionConfig_{};
+    AuthorityRoster<4> roster_{};
+    GardenSessionKind sessionKind_ = GardenSessionKind::Offline;
+
     float camYaw = 0.7f;
     float camDist = 14.f;
     float camHeight = 3.6f;
@@ -1145,11 +1160,12 @@ struct GardenGame::State final {
             hf.sampleCount = tr.sampleCount;
             hf.heights = std::span<float const>(tr.heights.data(), tr.heights.size());
             hf.material = staticMat;
-            (void)physicsScene_->addStaticHeightField(hf);
+            PhysicsStaticHeightFieldDesc const hfJ = localGameplayHeightFieldToJolt(island_, hf);
+            (void)physicsScene_->addStaticHeightField(hfJ);
         }
         for (Aabb const& box : layout.staticColliders) {
             PhysicsStaticBoxDesc d{};
-            d.bounds = box;
+            d.bounds = localGameplayAabbToJolt(island_, box);
             d.material = staticMat;
             (void)physicsScene_->addStaticBox(d);
         }
@@ -1160,7 +1176,7 @@ struct GardenGame::State final {
         marbleMat.angularDamping = 0.10f;
         for (std::size_t i = 0; i < marbles.size(); ++i) {
             PhysicsDynamicSphereDesc sd{};
-            sd.center = marbles[i].position;
+            sd.center = localGameplayToJolt(island_, marbles[i].position);
             sd.linearVelocity = marbles[i].linearVelocity;
             sd.radius = kMarbleRadius;
             sd.invMass = marbles[i].invMass;
@@ -1170,8 +1186,32 @@ struct GardenGame::State final {
         physicsScene_->optimizeBroadPhase();
     }
 
-    explicit State(core::Engine& e) : engine(e) {
+    explicit State(core::Engine& e, GardenSessionKind session) : engine(e), sessionKind_(session) {
         meshProps.fill(std::numeric_limits<std::uint32_t>::max());
+        if (sessionKind_ == GardenSessionKind::ListenHost) {
+            sessionConfig_ = SessionConfig{
+                MultiplayerMode::ListenServer,
+                4u,
+                60u,
+                20u,
+                2u,
+            };
+            (void)roster_.bootstrap(MultiplayerMode::ListenServer);
+        } else {
+            sessionConfig_ = SessionConfig{
+                MultiplayerMode::Offline,
+                1u,
+                60u,
+                20u,
+                2u,
+            };
+            (void)roster_.bootstrap(MultiplayerMode::Offline);
+        }
+        if (!isValid(sessionConfig_)) {
+            sessionConfig_ = SessionConfig{};
+            (void)roster_.bootstrap(MultiplayerMode::Offline);
+            sessionKind_ = GardenSessionKind::Offline;
+        }
         buildGardenLayout(kLayoutSeed, layout);
         placeMarblesInArena(marbles, layout);
         physics.setSettings({
@@ -1598,16 +1638,34 @@ struct GardenGame::State final {
             char buf[256];
             if (paused) {
                 if (pausePanel == PausePanel::Options) {
+                    if (sessionKind_ == GardenSessionKind::ListenHost) {
+                        (void)std::snprintf(
+                            buf,
+                            sizeof(buf),
+                            "Garden — Paused — Listen host — Options — Esc · O · R · Q");
+                    } else {
+                        (void)std::snprintf(
+                            buf,
+                            sizeof(buf),
+                            "Garden — Paused — Options — Esc · O back · R · Q menu");
+                    }
+                } else if (sessionKind_ == GardenSessionKind::ListenHost) {
                     (void)std::snprintf(
                         buf,
                         sizeof(buf),
-                        "Garden — Paused — Options — Esc · O back · R · Q menu");
+                        "Garden — Paused — Listen host — Esc resume · O · R · Q menu");
                 } else {
                     (void)std::snprintf(
                         buf,
                         sizeof(buf),
                         "Garden — Paused — Esc resume · O options · R restart · Q menu");
                 }
+            } else if (sessionKind_ == GardenSessionKind::ListenHost) {
+                (void)std::snprintf(
+                    buf,
+                    sizeof(buf),
+                    "Garden — Listen host — tick %llu — Esc · WASD · Space · E/C · flick",
+                    static_cast<unsigned long long>(ctx.frameIndex));
             } else {
                 (void)std::snprintf(
                     buf,
@@ -1717,7 +1775,8 @@ private:
     GardenGame::State* state_;
 };
 
-GardenGame::GardenGame(core::Engine& engine) : engine_(engine), state_(std::make_unique<State>(engine)) {}
+GardenGame::GardenGame(core::Engine& engine, GardenSessionKind session)
+    : engine_(engine), state_(std::make_unique<State>(engine, session)) {}
 
 GardenGame::~GardenGame() {
     if (state_) {

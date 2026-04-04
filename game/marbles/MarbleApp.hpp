@@ -7,7 +7,7 @@
 
 namespace marble::marbles_app {
 
-enum class PostLandingAction { Quit, Marbles, Garden };
+enum class PostLandingAction { Quit, Marbles, Garden, GardenListenHost };
 
 /// Windowed: main menu then Marbles or Garden in a loop; Esc pause, then Q returns to this menu; window close exits.
 [[nodiscard]] int runWindowedGameLoop(

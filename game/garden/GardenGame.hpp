@@ -8,12 +8,19 @@
 
 namespace marble::garden_app {
 
+enum class GardenSessionKind : std::uint8_t {
+    /// Single-player; offline `SessionConfig` (see `OnlineMultiplayerFoundation.hpp`).
+    Offline,
+    /// Listen-server topology bootstrapped (no transport yet); session/roster visible for development.
+    ListenHost,
+};
+
 /// Phase-1 sample: fixed-step garden physics, two marbles, third-person camera, mouse flick.
 class GardenGame {
 public:
     struct State;
 
-    explicit GardenGame(core::Engine& engine);
+    explicit GardenGame(core::Engine& engine, GardenSessionKind session = GardenSessionKind::Offline);
     ~GardenGame();
 
     void installPhases();
