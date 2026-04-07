@@ -29,11 +29,20 @@ inline constexpr WorldObjectRef kInvalidWorldObjectRef{};
     return ref.guid != 0u;
 }
 
+/// Server replication / physics budget class for chunk objects; see docs/architecture/multiplayer-physics-world-scale.md.
+enum class ObjectSimulationClass : std::uint8_t {
+    Static = 0,
+    Sleepable = 1,
+    Dynamic = 2,
+    Cosmetic = 3
+};
+
 struct ChunkObjectRecord {
     WorldObjectRef self{};
     std::uint32_t archetypeId{};
     math::Vec3 position{};
     WorldObjectRef parent{}; // optional parent link for graph reconstruction
+    ObjectSimulationClass simulationClass{ObjectSimulationClass::Static};
 };
 
 template <std::size_t MaxRecords>
