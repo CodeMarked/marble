@@ -11,8 +11,12 @@
 #include "math/Geometry.hpp"
 #include "math/Mat4.hpp"
 #include "math/Vec3.hpp"
+#include "gameplay/ClientSession.hpp"
+#include "gameplay/MultiplayerWireFormat.hpp"
 #include "gameplay/OnlineMultiplayerFoundation.hpp"
 #include "gameplay/SimulationIsland.hpp"
+#include "gameplay/SnapshotInterpolator.hpp"
+#include "gameplay/UdpGameTransport.hpp"
 #include "physics/PhysicsIntegration.hpp"
 #include "physics/RigidBodyDynamics.hpp"
 #include "platform/window/Window.hpp"
@@ -75,13 +79,23 @@ using marble::physics::SimplePhysicsWorld;
 using marble::physics::createJoltPhysicsScene;
 using marble::physics::applyImpulseLinear;
 using marble::gameplay::AuthorityRoster;
+using marble::gameplay::ClientSession;
+using marble::gameplay::ConnectionState;
+using marble::gameplay::EntityKinematicsSnapshot;
+using marble::gameplay::kInvalidPeerId;
+using marble::gameplay::PeerId;
+using marble::gameplay::InterpolatedEntity;
 using marble::gameplay::MultiplayerMode;
 using marble::gameplay::SessionConfig;
 using marble::gameplay::SimulationIsland;
+using marble::gameplay::SnapshotInterpolator;
+using marble::gameplay::UdpGameTransport;
 using marble::gameplay::isValid;
+using marble::gameplay::kEntityKinematicsSnapshotWireBytes;
 using marble::gameplay::localGameplayAabbToJolt;
 using marble::gameplay::localGameplayHeightFieldToJolt;
 using marble::gameplay::localGameplayToJolt;
+using marble::gameplay::readEntityKinematicsSnapshot;
 using marble::platform::Key;
 using marble::platform::MouseButton;
 using marble::render::FrameOverlayTint;
@@ -1091,6 +1105,13 @@ struct GardenGame::State final {
     SessionConfig sessionConfig_{};
     AuthorityRoster<4> roster_{};
     GardenSessionKind sessionKind_ = GardenSessionKind::Offline;
+    RemoteClientParams clientParams_{};
+
+    std::unique_ptr<UdpGameTransport> clientTransport_{};
+    ClientSession<> clientSession_{};
+    SnapshotInterpolator<> snapInterp_{};
+    bool clientConnected_{};
+    std::size_t lastSnapCount_{};
 
     float camYaw = 0.7f;
     float camDist = 14.f;
@@ -1186,7 +1207,8 @@ struct GardenGame::State final {
         physicsScene_->optimizeBroadPhase();
     }
 
-    explicit State(core::Engine& e, GardenSessionKind session) : engine(e), sessionKind_(session) {
+    explicit State(core::Engine& e, GardenSessionKind session, RemoteClientParams params = {})
+        : engine(e), sessionKind_(session), clientParams_(std::move(params)) {
         meshProps.fill(std::numeric_limits<std::uint32_t>::max());
         if (sessionKind_ == GardenSessionKind::ListenHost) {
             sessionConfig_ = SessionConfig{
@@ -1207,24 +1229,56 @@ struct GardenGame::State final {
             };
             (void)roster_.bootstrap(MultiplayerMode::Offline);
         }
-        if (!isValid(sessionConfig_)) {
+        if (sessionKind_ != GardenSessionKind::RemoteClient && !isValid(sessionConfig_)) {
             sessionConfig_ = SessionConfig{};
             (void)roster_.bootstrap(MultiplayerMode::Offline);
             sessionKind_ = GardenSessionKind::Offline;
         }
         buildGardenLayout(kLayoutSeed, layout);
         placeMarblesInArena(marbles, layout);
-        physics.setSettings({
-            .gravity = {0.f, -9.81f, 0.f},
-            .enableContinuousCollision = true,
-            .maxSubSteps = 4u,
-        });
-        rebuildPhysicsFromLayout();
+
+        if (sessionKind_ == GardenSessionKind::RemoteClient) {
+            initClientNetworking();
+        } else {
+            physics.setSettings({
+                .gravity = {0.f, -9.81f, 0.f},
+                .enableContinuousCollision = true,
+                .maxSubSteps = 4u,
+            });
+            rebuildPhysicsFromLayout();
+        }
 
         (void)inputRemap_.bind(AbstractControl::BackSelect, {kActionPauseMenu, ControlValueClass::DigitalButton, false});
 
         inputPolicy_.resetActionGates();
         inputPolicy_.applyActionContext(std::span{kGameplayContext});
+    }
+
+    void initClientNetworking() noexcept {
+        clientTransport_ = std::make_unique<UdpGameTransport>();
+        if (!clientTransport_->bind(0u)) {
+            std::fprintf(stderr, "GardenGame: failed to bind client UDP socket\n");
+            sessionKind_ = GardenSessionKind::Offline;
+            physics.setSettings({.gravity = {0.f, -9.81f, 0.f}, .enableContinuousCollision = true, .maxSubSteps = 4u});
+            rebuildPhysicsFromLayout();
+            return;
+        }
+        constexpr PeerId kServerPeerId = 1u;
+        if (!clientTransport_->addPeer(kServerPeerId, clientParams_.host.c_str(), clientParams_.port)) {
+            std::fprintf(stderr, "GardenGame: failed to add server peer\n");
+            sessionKind_ = GardenSessionKind::Offline;
+            physics.setSettings({.gravity = {0.f, -9.81f, 0.f}, .enableContinuousCollision = true, .maxSubSteps = 4u});
+            rebuildPhysicsFromLayout();
+            return;
+        }
+        if (!clientSession_.initialize(clientTransport_.get(), kServerPeerId, 60u, 0xCAFEu)) {
+            std::fprintf(stderr, "GardenGame: failed to initialize client session\n");
+            sessionKind_ = GardenSessionKind::Offline;
+            physics.setSettings({.gravity = {0.f, -9.81f, 0.f}, .enableContinuousCollision = true, .maxSubSteps = 4u});
+            rebuildPhysicsFromLayout();
+            return;
+        }
+        snapInterp_.setRenderDelayTicks(4u);
     }
 
     void primeAssetRegistryOnce() {
@@ -1243,7 +1297,9 @@ struct GardenGame::State final {
     void restartGarden() noexcept {
         buildGardenLayout(kLayoutSeed, layout);
         placeMarblesInArena(marbles, layout);
-        rebuildPhysicsFromLayout();
+        if (sessionKind_ != GardenSessionKind::RemoteClient) {
+            rebuildPhysicsFromLayout();
+        }
         camYaw = camYawTarget = 0.7f;
         camDist = camDistTarget = 14.f;
         camHeight = camHeightTarget = 3.6f;
@@ -1256,6 +1312,52 @@ struct GardenGame::State final {
         jumpWasHeld_ = false;
         paused = false;
         pausePanel = PausePanel::Main;
+    }
+
+    void tickRemoteClient(float dt) noexcept {
+        if (!clientTransport_) {
+            return;
+        }
+        clientSession_.tick(dt);
+
+        if (clientSession_.state() == ConnectionState::Connected && !clientConnected_) {
+            clientConnected_ = true;
+        }
+
+        std::size_t const currentSnapCount = clientSession_.snapshotCount();
+        if (currentSnapCount > lastSnapCount_) {
+            for (std::size_t s = lastSnapCount_; s < currentSnapCount; ++s) {
+                std::size_t const reverseIdx = currentSnapCount - 1u - s;
+                auto const* entry = clientSession_.snapshotAt(reverseIdx);
+                if (entry == nullptr || !entry->valid) {
+                    continue;
+                }
+                std::array<EntityKinematicsSnapshot, 16> snaps{};
+                std::size_t count = 0u;
+                std::size_t offset = 0u;
+                while (offset + kEntityKinematicsSnapshotWireBytes <= entry->payloadLen && count < snaps.size()) {
+                    if (!readEntityKinematicsSnapshot(entry->payload.data() + offset,
+                                                      entry->payloadLen - offset, snaps[count])) {
+                        break;
+                    }
+                    offset += kEntityKinematicsSnapshotWireBytes;
+                    ++count;
+                }
+                if (count > 0u) {
+                    snapInterp_.pushSnapshot(snaps[0].simTick, snaps.data(), count);
+                }
+            }
+            lastSnapCount_ = currentSnapCount;
+        }
+
+        std::uint32_t const renderTick = snapInterp_.suggestRenderTick();
+        std::array<InterpolatedEntity, 16> interpolated{};
+        std::size_t const interpCount = snapInterp_.interpolate(renderTick, interpolated.data(), interpolated.size());
+
+        for (std::size_t i = 0u; i < interpCount && i < marbles.size(); ++i) {
+            marbles[i].position = interpolated[i].position;
+            marbles[i].linearVelocity = interpolated[i].velocity;
+        }
     }
 
     void step(core::Engine::FrameContext const& ctx) {
@@ -1622,7 +1724,9 @@ struct GardenGame::State final {
             }
         }
 
-        if (!paused) {
+        if (!paused && sessionKind_ == GardenSessionKind::RemoteClient) {
+            tickRemoteClient(h);
+        } else if (!paused && sessionKind_ != GardenSessionKind::RemoteClient) {
             float const minCenterY = layout.terrain.minHeight - kMarbleRadius - 0.55f;
             PhysicsCylindricalXZClamp const clamp{
                 kGardenRadius - kMarbleRadius - 0.02f,
@@ -1660,6 +1764,19 @@ struct GardenGame::State final {
                         sizeof(buf),
                         "Garden — Paused — Esc resume · O options · R restart · Q menu");
                 }
+            } else if (sessionKind_ == GardenSessionKind::RemoteClient) {
+                char const* connStr = "Connecting...";
+                if (clientSession_.state() == ConnectionState::Connected) {
+                    connStr = "Connected";
+                } else if (clientSession_.state() == ConnectionState::Disconnected && clientConnected_) {
+                    connStr = "Disconnected";
+                }
+                (void)std::snprintf(
+                    buf,
+                    sizeof(buf),
+                    "Garden - Remote [%s] - %llu snaps - Esc - arrows camera",
+                    connStr,
+                    static_cast<unsigned long long>(snapInterp_.frameCount()));
             } else if (sessionKind_ == GardenSessionKind::ListenHost) {
                 (void)std::snprintf(
                     buf,
@@ -1775,8 +1892,8 @@ private:
     GardenGame::State* state_;
 };
 
-GardenGame::GardenGame(core::Engine& engine, GardenSessionKind session)
-    : engine_(engine), state_(std::make_unique<State>(engine, session)) {}
+GardenGame::GardenGame(core::Engine& engine, GardenSessionKind session, RemoteClientParams clientParams)
+    : engine_(engine), state_(std::make_unique<State>(engine, session, std::move(clientParams))) {}
 
 GardenGame::~GardenGame() {
     if (state_) {

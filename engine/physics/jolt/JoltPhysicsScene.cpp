@@ -17,6 +17,7 @@
 #include <Jolt/Physics/Body/BodyInterface.h>
 #include <Jolt/Physics/Collision/ContactListener.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
+#include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Collision/Shape/HeightFieldShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/PhysicsSettings.h>
@@ -327,6 +328,41 @@ public:
         return static_cast<PhysicsBodyId>(slots_.size());
     }
 
+    PhysicsBodyId addDynamicCapsule(PhysicsDynamicCapsuleDesc const& desc) override {
+        CapsuleShapeSettings capsule_settings(desc.halfHeight, desc.radius);
+        capsule_settings.SetEmbedded();
+        ShapeSettings::ShapeResult sr = capsule_settings.Create();
+        if (sr.HasError()) {
+            return kInvalidPhysicsBodyId;
+        }
+        ShapeRefC shape = sr.Get();
+        BodyCreationSettings bs(
+            shape,
+            toRVec3(desc.center),
+            Quat::sIdentity(),
+            EMotionType::Dynamic,
+            Layers::MOVING
+        );
+        bs.mRestitution = desc.material.restitution;
+        bs.mFriction = desc.material.friction;
+        bs.mLinearDamping = desc.material.linearDamping;
+        bs.mAngularDamping = desc.material.angularDamping;
+        bs.mOverrideMassProperties = EOverrideMassProperties::CalculateInertia;
+        bs.mMassPropertiesOverride.mMass =
+            desc.invMass > 0.f ? (1.f / desc.invMass) : 1.f;
+        bs.mMotionQuality = EMotionQuality::LinearCast;
+        bs.mAllowSleeping = sleepingEnabled_;
+        bs.mUserData = packFilter(desc.filter);
+        BodyInterface& iface = impl_->physics_system.GetBodyInterface();
+        BodyID const id = iface.CreateAndAddBody(bs, EActivation::Activate);
+        if (id.IsInvalid()) {
+            return kInvalidPhysicsBodyId;
+        }
+        iface.SetLinearVelocity(id, toVec3(desc.linearVelocity));
+        slots_.push_back(BodySlot{id, true, true});
+        return static_cast<PhysicsBodyId>(slots_.size());
+    }
+
     void removeBody(PhysicsBodyId id) override {
         BodyID j = joltId(id);
         if (j.IsInvalid()) {
@@ -451,6 +487,22 @@ public:
         iface.SetPositionAndRotationWhenChanged(j, toRVec3(center), Quat::sIdentity(), EActivation::Activate);
         iface.SetLinearVelocity(j, toVec3(linearVelocity));
         iface.SetAngularVelocity(j, Vec3::sZero());
+    }
+
+    void applyLinearImpulse(PhysicsBodyId id, math::Vec3 impulse) override {
+        BodyID const j = joltId(id);
+        if (j.IsInvalid()) {
+            return;
+        }
+        impl_->physics_system.GetBodyInterface().AddImpulse(j, toVec3(impulse));
+    }
+
+    void setBodyLinearVelocity(PhysicsBodyId id, math::Vec3 linearVelocity) override {
+        BodyID const j = joltId(id);
+        if (j.IsInvalid()) {
+            return;
+        }
+        impl_->physics_system.GetBodyInterface().SetLinearVelocity(j, toVec3(linearVelocity));
     }
 
     void activateBody(PhysicsBodyId id) override {

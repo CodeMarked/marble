@@ -50,6 +50,18 @@ struct PhysicsDynamicSphereDesc {
     CollisionFilter filter{0xFFFFFFFFu, 0xFFFFFFFFu};
 };
 
+/// Dynamic capsule (cylinder with hemispherical caps) aligned along +Y.
+/// Total height = `2 * halfHeight + 2 * radius`.
+struct PhysicsDynamicCapsuleDesc {
+    math::Vec3 center{};
+    math::Vec3 linearVelocity{};
+    float halfHeight = 0.5f;
+    float radius = 0.25f;
+    float invMass = 1.f;
+    PhysicsBodyMaterial material{};
+    CollisionFilter filter{0xFFFFFFFFu, 0xFFFFFFFFu};
+};
+
 /// Optional horizontal cylinder about +Y through the origin: clamps body **center** after the solver (gameplay bounds).
 struct PhysicsCylindricalXZClamp {
     /// Max allowed horizontal distance `sqrt(x*x + z*z)` for the body center (meters).

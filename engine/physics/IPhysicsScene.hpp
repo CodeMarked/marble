@@ -13,8 +13,9 @@ namespace marble::physics {
 
 /// Game-agnostic rigid-body **scene** backed by middleware (Jolt). No game layouts or sample constants.
 ///
-/// Extension points (Stage B): additional `add*` overloads (capsule, convex hull), collision filters mapped from
-/// [`CollisionFilter`](CollisionMiddleware.hpp), sleeping/CCD driven from [`PhysicsWorldSettings`](PhysicsWorld.hpp).
+/// Extension points (Stage B): additional `add*` overloads (capsule, convex hull). **Landed in Jolt:** per-body
+/// [`CollisionFilter`](CollisionMiddleware.hpp) on [`MiddlewarePhysicsTypes.hpp`](MiddlewarePhysicsTypes.hpp) descriptors
+/// (narrow-phase validate on top of the static/dynamic broadphase), and [`PhysicsWorldSettings::enableSleeping`](PhysicsWorld.hpp).
 class IPhysicsScene {
 public:
     virtual ~IPhysicsScene() noexcept = default;
@@ -24,6 +25,7 @@ public:
     [[nodiscard]] virtual PhysicsBodyId addStaticBox(PhysicsStaticBoxDesc const& desc) = 0;
     [[nodiscard]] virtual PhysicsBodyId addStaticHeightField(PhysicsStaticHeightFieldDesc const& desc) = 0;
     [[nodiscard]] virtual PhysicsBodyId addDynamicSphere(PhysicsDynamicSphereDesc const& desc) = 0;
+    [[nodiscard]] virtual PhysicsBodyId addDynamicCapsule(PhysicsDynamicCapsuleDesc const& desc) = 0;
 
     virtual void removeBody(PhysicsBodyId id) = 0;
 
@@ -49,6 +51,12 @@ public:
 
     /// Teleport / respawn: set world-space COM and linear velocity. Invalid `id` is a no-op.
     virtual void setBodyCenterAndLinearVelocity(PhysicsBodyId id, math::Vec3 center, math::Vec3 linearVelocity) = 0;
+
+    /// Apply an instantaneous linear impulse (mass * velocity change) to a dynamic body. Invalid `id` is a no-op.
+    virtual void applyLinearImpulse(PhysicsBodyId id, math::Vec3 impulse) = 0;
+
+    /// Override the linear velocity of a dynamic body directly. Invalid `id` is a no-op.
+    virtual void setBodyLinearVelocity(PhysicsBodyId id, math::Vec3 linearVelocity) = 0;
 
     /// Wake a dynamic body (e.g. after changing global gravity so sleeping bodies integrate again). Invalid `id` is a no-op.
     virtual void activateBody(PhysicsBodyId id) = 0;
