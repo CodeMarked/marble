@@ -218,3 +218,18 @@ PRIVATE
     engine
 )
 
+add_executable(garden_server
+    garden_server/GardenServerMain.cpp
+)
+
+target_include_directories(garden_server
+PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_link_libraries(garden_server
+PRIVATE
+    engine
+    garden_sim
+)
+

@@ -24,10 +24,32 @@ int main(int argc, char** argv)
     config.appName = "Marble - launcher";
     config.resolveAssetsRoot = true;
     std::optional<std::uint32_t> physicalDeviceIndex;
+    std::string joinHost;
+    std::uint16_t joinPort = 27778u;
+    bool joinMode = false;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--headless") {
             config.headless = true;
+            continue;
+        }
+        if (arg == "--join" && (i + 1) < argc) {
+            joinHost = argv[++i];
+            joinMode = true;
+            continue;
+        }
+        if (arg == "--join-port" && (i + 1) < argc) {
+            try {
+                unsigned long const v = std::stoul(argv[++i]);
+                if (v > 65535ul) {
+                    (void)logPrintf(0, kGeneral, "Invalid value for --join-port");
+                    return 2;
+                }
+                joinPort = static_cast<std::uint16_t>(v);
+            } catch (...) {
+                (void)logPrintf(0, kGeneral, "Invalid value for --join-port");
+                return 2;
+            }
             continue;
         }
         if (arg == "--assets" && (i + 1) < argc) {
@@ -84,7 +106,14 @@ int main(int argc, char** argv)
         std::filesystem::path const exeDir = marble::platform::executableDirectory();
         std::string const shaderDir = (exeDir / "shaders").string();
 
-        if (config.headless) {
+        if (joinMode) {
+            exitCode = marble::marbles_app::runGameplaySession(
+                engine,
+                marble::marbles_app::PostLandingAction::GardenRemoteClient,
+                shaderDir,
+                physicalDeviceIndex
+            );
+        } else if (config.headless) {
             exitCode = marble::marbles_app::runGameplaySession(
                 engine,
                 marble::marbles_app::PostLandingAction::Marbles,

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "gameplay/GameTransport.hpp"
+#include "gameplay/InterestManagement.hpp"
 #include "gameplay/MultiplayerSessionEnvelope.hpp"
 #include "gameplay/ReliableChannel.hpp"
 
@@ -9,15 +10,6 @@
 #include <cstdint>
 
 namespace marble::gameplay {
-
-/// Small replicated entity state driven by external simulation and emitted as snapshots.
-struct ReplicatedEntity {
-    WorldObjectRef entity{};
-    math::Vec3 position{};
-    math::Vec3 velocity{};
-    PhysicsSimulationTier tier{PhysicsSimulationTier::Contact};
-    bool active{};
-};
 
 /// Authoritative session manager: fixed-tick loop driving small replicated state
 /// with per-peer reliable channels for control messages ([ADR-0054], [ADR-0060]).
@@ -135,7 +127,37 @@ public:
         return findPeerState(peer);
     }
 
+    /// Enable per-peer AOI filtering. When enabled, `emitSnapshots` only sends entities
+    /// within the peer's interest region. The view position is derived from the entity
+    /// at `viewEntityIndex`.
+    void setAoiEnabled(bool enabled) noexcept { aoiEnabled_ = enabled; }
+    [[nodiscard]] bool aoiEnabled() const noexcept { return aoiEnabled_; }
+
+    void setDefaultAoiRadius(float radius) noexcept { defaultAoiRadius_ = radius; }
+    [[nodiscard]] float defaultAoiRadius() const noexcept { return defaultAoiRadius_; }
+
+    /// Set which entity a peer "sees from" for AOI center. Defaults to 0.
+    void setPeerViewEntity(PeerId peer, std::size_t entityIndex) noexcept {
+        for (auto& pi : peerInterest_) {
+            if (pi.peer == peer) {
+                pi.viewEntityIndex = entityIndex;
+                return;
+            }
+        }
+        for (auto& pi : peerInterest_) {
+            if (pi.peer == kInvalidPeerId) {
+                pi.peer = peer;
+                pi.viewEntityIndex = entityIndex;
+                return;
+            }
+        }
+    }
+
 private:
+    struct PeerInterestEntry {
+        PeerId peer{kInvalidPeerId};
+        std::size_t viewEntityIndex{};
+    };
     void processTransport() noexcept {
         std::array<std::uint8_t, kTransportBufSize> buf{};
         PeerId from{kInvalidPeerId};
@@ -254,6 +276,64 @@ private:
     }
 
     void emitSnapshots() noexcept {
+        if (!aoiEnabled_) {
+            emitSnapshotUnfiltered();
+            return;
+        }
+
+        for (auto const& ps : peerStates_) {
+            if (!ps.active || ps.connectionState != ConnectionState::Connected) {
+                continue;
+            }
+            InterestRegion region{};
+            region.radius = defaultAoiRadius_;
+
+            std::size_t viewIdx = 0u;
+            for (auto const& pi : peerInterest_) {
+                if (pi.peer == ps.peer) {
+                    viewIdx = pi.viewEntityIndex;
+                    break;
+                }
+            }
+            if (viewIdx < kMaxEntities && entities_[viewIdx].active) {
+                region.viewPosition = entities_[viewIdx].position;
+            }
+
+            std::array<ReplicatedEntity, kMaxEntities> filtered{};
+            std::size_t const filteredCount = filterEntitiesForPeer<kMaxEntities>(
+                entities_.data(), kMaxEntities, region, filtered.data(), kMaxEntities
+            );
+
+            std::array<std::uint8_t, kTransportBufSize> inner{};
+            std::size_t offset = 0u;
+            for (std::size_t i = 0u; i < filteredCount; ++i) {
+                EntityKinematicsSnapshot snap{};
+                snap.simTick = simTick_;
+                snap.entity = filtered[i].entity;
+                snap.tier = filtered[i].tier;
+                snap.positionLocal = filtered[i].position;
+                snap.linearVelocity = filtered[i].velocity;
+                std::size_t const written =
+                    writeEntityKinematicsSnapshot(inner.data() + offset, inner.size() - offset, snap);
+                if (written == 0u) {
+                    break;
+                }
+                offset += written;
+            }
+            if (offset == 0u) {
+                continue;
+            }
+
+            std::array<std::uint8_t, kTransportBufSize> frame{};
+            std::size_t const frameLen =
+                writeSessionGameSnapshot(frame.data(), frame.size(), inner.data(), offset);
+            if (frameLen > 0u) {
+                static_cast<void>(transport_->send(ps.peer, frame.data(), frameLen));
+            }
+        }
+    }
+
+    void emitSnapshotUnfiltered() noexcept {
         std::array<std::uint8_t, kTransportBufSize> inner{};
         std::size_t offset = 0u;
 
@@ -356,6 +436,10 @@ private:
 
     std::array<PeerState, MaxPlayers> peerStates_{};
     std::array<ReplicatedEntity, kMaxEntities> entities_{};
+
+    bool aoiEnabled_{};
+    float defaultAoiRadius_{500.f};
+    std::array<PeerInterestEntry, MaxPlayers> peerInterest_{};
 };
 
 } // namespace marble::gameplay

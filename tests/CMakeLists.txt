@@ -1012,6 +1012,49 @@ add_test(
     COMMAND scripting_game_flow_test
 )
 
+add_executable(jolt_dynamic_capsule_test
+    jolt_dynamic_capsule_test.cpp
+)
+
+target_link_libraries(jolt_dynamic_capsule_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME jolt_dynamic_capsule_test
+    COMMAND jolt_dynamic_capsule_test
+)
+
+add_executable(interest_management_test
+    interest_management_test.cpp
+)
+
+target_link_libraries(interest_management_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME interest_management_test
+    COMMAND interest_management_test
+)
+
+add_executable(garden_server_smoke_test
+    garden_server_smoke_test.cpp
+)
+
+target_link_libraries(garden_server_smoke_test
+PRIVATE
+    engine
+    garden_sim
+)
+
+add_test(
+    NAME garden_server_smoke_test
+    COMMAND garden_server_smoke_test
+)
+
 if(TARGET Jolt)
     add_executable(jolt_physics_smoke_test
         jolt_physics_smoke_test.cpp

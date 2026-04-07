@@ -2,6 +2,7 @@
 
 #include "core/Engine.hpp"
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -13,6 +14,14 @@ enum class GardenSessionKind : std::uint8_t {
     Offline,
     /// Listen-server topology bootstrapped (no transport yet); session/roster visible for development.
     ListenHost,
+    /// Remote client: connects to a garden_server, receives and interpolates snapshots.
+    RemoteClient,
+};
+
+/// Connection parameters for RemoteClient mode.
+struct RemoteClientParams {
+    std::string host = "127.0.0.1";
+    std::uint16_t port = 27778u;
 };
 
 /// Phase-1 sample: fixed-step garden physics, two marbles, third-person camera, mouse flick.
@@ -20,7 +29,11 @@ class GardenGame {
 public:
     struct State;
 
-    explicit GardenGame(core::Engine& engine, GardenSessionKind session = GardenSessionKind::Offline);
+    explicit GardenGame(
+        core::Engine& engine,
+        GardenSessionKind session = GardenSessionKind::Offline,
+        RemoteClientParams clientParams = {}
+    );
     ~GardenGame();
 
     void installPhases();
