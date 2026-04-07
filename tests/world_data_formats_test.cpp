@@ -22,7 +22,7 @@ int main() {
 
     const ChunkObjectRecord r1{{101u}, 10u, {0.f, 0.f, 0.f}, {}};
     const ChunkObjectRecord r2{{102u}, 20u, {5.f, 0.f, 0.f}, {101u}};
-    const ChunkObjectRecord r3{{103u}, 30u, {12.f, 0.f, 0.f}, {}};
+    const ChunkObjectRecord r3{{103u}, 30u, {12.f, 0.f, 0.f}, {}, ObjectSimulationClass::Dynamic};
     if (!appendRecord(chunk, r1) || !appendRecord(chunk, r2) || !appendRecord(chunk, r3)) {
         return 3;
     }
@@ -33,6 +33,13 @@ int main() {
     ChunkObjectRecord const* f = findRecordByGuid(chunk, {102u});
     if (f == nullptr || f->archetypeId != 20u || f->parent.guid != 101u) {
         return 5;
+    }
+    if (f->simulationClass != ObjectSimulationClass::Static) {
+        return 10;
+    }
+    ChunkObjectRecord const* d = findRecordByGuid(chunk, {103u});
+    if (d == nullptr || d->simulationClass != ObjectSimulationClass::Dynamic) {
+        return 11;
     }
     if (findRecordByGuid(chunk, {999u}) != nullptr) {
         return 6;

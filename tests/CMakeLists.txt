@@ -858,6 +858,118 @@ add_test(
     COMMAND online_multiplayer_foundation_test
 )
 
+add_executable(multiplayer_wire_format_test
+    multiplayer_wire_format_test.cpp
+)
+
+target_link_libraries(multiplayer_wire_format_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME multiplayer_wire_format_test
+    COMMAND multiplayer_wire_format_test
+)
+
+add_executable(loopback_game_transport_test
+    loopback_game_transport_test.cpp
+)
+
+target_link_libraries(loopback_game_transport_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME loopback_game_transport_test
+    COMMAND loopback_game_transport_test
+)
+
+add_executable(udp_game_transport_integration_test
+    udp_game_transport_integration_test.cpp
+)
+
+target_link_libraries(udp_game_transport_integration_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME udp_game_transport_integration_test
+    COMMAND udp_game_transport_integration_test
+)
+
+add_executable(multiplayer_session_envelope_test
+    multiplayer_session_envelope_test.cpp
+)
+
+target_link_libraries(multiplayer_session_envelope_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME multiplayer_session_envelope_test
+    COMMAND multiplayer_session_envelope_test
+)
+
+add_executable(reliable_channel_test
+    reliable_channel_test.cpp
+)
+
+target_link_libraries(reliable_channel_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME reliable_channel_test
+    COMMAND reliable_channel_test
+)
+
+add_executable(reliable_envelope_test
+    reliable_envelope_test.cpp
+)
+
+target_link_libraries(reliable_envelope_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME reliable_envelope_test
+    COMMAND reliable_envelope_test
+)
+
+add_executable(authoritative_session_test
+    authoritative_session_test.cpp
+)
+
+target_link_libraries(authoritative_session_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME authoritative_session_test
+    COMMAND authoritative_session_test
+)
+
+add_executable(snapshot_interpolator_test
+    snapshot_interpolator_test.cpp
+)
+
+target_link_libraries(snapshot_interpolator_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME snapshot_interpolator_test
+    COMMAND snapshot_interpolator_test
+)
+
 add_executable(scripting_game_flow_test
     scripting_game_flow_test.cpp
 )

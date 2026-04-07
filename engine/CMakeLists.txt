@@ -32,6 +32,8 @@ PRIVATE
     platform/window/Window.cpp
     render/vulkan/VulkanRhi.cpp
     physics/jolt/JoltPhysicsScene.cpp
+    platform/network/UdpSocket.cpp
+    gameplay/UdpGameTransport.cpp
 )
 
 target_include_directories(engine
@@ -50,3 +52,7 @@ PUBLIC
 PRIVATE
     Jolt
 )
+
+if(WIN32)
+    target_link_libraries(engine PUBLIC ws2_32)
+endif()
