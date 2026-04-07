@@ -409,6 +409,34 @@ add_test(
     COMMAND garden_simulation_test
 )
 
+add_executable(jolt_sleeping_test
+    jolt_sleeping_test.cpp
+)
+
+target_link_libraries(jolt_sleeping_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME jolt_sleeping_test
+    COMMAND jolt_sleeping_test
+)
+
+add_executable(jolt_collision_filter_test
+    jolt_collision_filter_test.cpp
+)
+
+target_link_libraries(jolt_collision_filter_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME jolt_collision_filter_test
+    COMMAND jolt_collision_filter_test
+)
+
 add_executable(time_policy_test
     time_policy_test.cpp
 )
