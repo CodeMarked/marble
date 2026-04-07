@@ -213,4 +213,50 @@ inline constexpr std::size_t kEntityKinematicsSnapshotWireBytes = 44u;
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Client input payload: world-space wish direction + buttons + client tick
+// for future prediction support.  Wire: [clientTick:u32][moveX:f32][moveZ:f32][buttons:u8][pad:3] = 16 bytes
+// ---------------------------------------------------------------------------
+
+struct ClientInputWirePayload {
+    std::uint32_t clientTick{};
+    float moveX{};
+    float moveZ{};
+    std::uint8_t buttons{};
+};
+
+inline constexpr std::uint8_t kClientInputButton_Jump = 0x01u;
+inline constexpr std::size_t kClientInputWirePayloadBytes = 16u;
+
+[[nodiscard]] inline std::size_t writeClientInputPayload(
+    std::uint8_t* out,
+    std::size_t cap,
+    ClientInputWirePayload const& p
+) noexcept {
+    if (out == nullptr || cap < kClientInputWirePayloadBytes) {
+        return 0u;
+    }
+    writeU32Le(out + 0u, p.clientTick);
+    writeF32Le(out + 4u, p.moveX);
+    writeF32Le(out + 8u, p.moveZ);
+    writeU8(out + 12u, p.buttons);
+    std::memset(out + 13u, 0, 3u);
+    return kClientInputWirePayloadBytes;
+}
+
+[[nodiscard]] inline bool readClientInputPayload(
+    std::uint8_t const* in,
+    std::size_t len,
+    ClientInputWirePayload& out
+) noexcept {
+    if (in == nullptr || len < kClientInputWirePayloadBytes) {
+        return false;
+    }
+    out.clientTick = readU32Le(in + 0u);
+    out.moveX = readF32Le(in + 4u);
+    out.moveZ = readF32Le(in + 8u);
+    out.buttons = readU8(in + 12u);
+    return true;
+}
+
 } // namespace marble::gameplay

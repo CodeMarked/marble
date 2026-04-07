@@ -1,5 +1,9 @@
 #include "gameplay/UdpGameTransport.hpp"
 
+#include "gameplay/MultiplayerSessionEnvelope.hpp"
+
+#include <algorithm>
+#include <array>
 #include <cstring>
 
 #if defined(_WIN32)
@@ -50,6 +54,11 @@ bool UdpGameTransport::bind(std::uint16_t port) noexcept {
         return false;
     }
     bound_ = true;
+    ingressHead_ = 0u;
+    ingressCount_ = 0u;
+    for (IngressEntry& q : ingressQueue_) {
+        q = {};
+    }
     return true;
 }
 
@@ -58,6 +67,11 @@ void UdpGameTransport::shutdown() noexcept {
     bound_ = false;
     for (PeerEntry& e : peers_) {
         e = {};
+    }
+    ingressHead_ = 0u;
+    ingressCount_ = 0u;
+    for (IngressEntry& q : ingressQueue_) {
+        q = {};
     }
 }
 
@@ -86,6 +100,96 @@ PeerId UdpGameTransport::peerIdFromSource(std::uint32_t ipv4Network, std::uint16
         }
     }
     return kInvalidPeerId;
+}
+
+bool UdpGameTransport::hasFreePeerSlot() const noexcept {
+    std::size_t active = 0u;
+    for (PeerEntry const& e : peers_) {
+        if (e.active) {
+            ++active;
+        }
+    }
+    return active < kMaxPeers;
+}
+
+PeerId UdpGameTransport::allocateJoinerPeerId() const noexcept {
+    if (!hasFreePeerSlot()) {
+        return kInvalidPeerId;
+    }
+    for (PeerId cand = 2u; cand < 500u; ++cand) {
+        if (findPeerById(cand) == nullptr) {
+            return cand;
+        }
+    }
+    return kInvalidPeerId;
+}
+
+bool UdpGameTransport::tryEnqueueIngress(PeerId from, void const* data, std::size_t len) noexcept {
+    if (from == kInvalidPeerId || data == nullptr || len == 0u || len > kMaxDatagramBytes) {
+        return false;
+    }
+    if (ingressCount_ >= kIngressQueueDepth) {
+        return false;
+    }
+    std::size_t const idx = (ingressHead_ + ingressCount_) % kIngressQueueDepth;
+    IngressEntry& e = ingressQueue_[idx];
+    e.from = from;
+    e.len = static_cast<std::uint16_t>(len);
+    std::memcpy(e.bytes.data(), data, len);
+    ++ingressCount_;
+    return true;
+}
+
+std::size_t UdpGameTransport::dequeueIngress(PeerId& outFrom, void* buffer, std::size_t bufferBytes) noexcept {
+    if (ingressCount_ == 0u || buffer == nullptr || bufferBytes == 0u) {
+        return 0u;
+    }
+    IngressEntry const& e = ingressQueue_[ingressHead_];
+    std::size_t const n = std::min<std::size_t>(static_cast<std::size_t>(e.len), bufferBytes);
+    std::memcpy(buffer, e.bytes.data(), n);
+    outFrom = e.from;
+    ingressHead_ = (ingressHead_ + 1u) % kIngressQueueDepth;
+    --ingressCount_;
+    return n;
+}
+
+void UdpGameTransport::pumpIngress() noexcept {
+    if (!bound_) {
+        return;
+    }
+    for (;;) {
+        std::array<std::uint8_t, kMaxDatagramBytes> scratch{};
+        std::uint32_t addr{};
+        std::uint16_t port{};
+        std::size_t len = 0u;
+        if (!socket_.tryRecvFrom(scratch.data(), scratch.size(), len, addr, port)) {
+            return;
+        }
+        if (len == 0u || len > kMaxDatagramBytes) {
+            continue;
+        }
+        PeerId const known = peerIdFromSource(addr, port);
+        if (known != kInvalidPeerId) {
+            static_cast<void>(tryEnqueueIngress(known, scratch.data(), len));
+            continue;
+        }
+        SessionMessageType msgType{};
+        std::uint8_t flags{};
+        std::uint8_t const* payload{};
+        std::size_t payloadLen{};
+        if (!parseSessionEnvelopeEx(scratch.data(), len, msgType, flags, payload, payloadLen) ||
+            msgType != SessionMessageType::Hello) {
+            continue;
+        }
+        PeerId const assign = allocateJoinerPeerId();
+        if (assign == kInvalidPeerId) {
+            continue;
+        }
+        if (!addPeerEndpoint(assign, addr, port)) {
+            continue;
+        }
+        static_cast<void>(tryEnqueueIngress(assign, scratch.data(), len));
+    }
 }
 
 bool UdpGameTransport::addPeerEndpoint(PeerId id, std::uint32_t ipv4Network, std::uint16_t portHost) noexcept {
@@ -134,20 +238,38 @@ bool UdpGameTransport::sendRaw(
     return socket_.sendTo(data, len, destIpv4Network, destPortHost);
 }
 
-std::size_t UdpGameTransport::receiveRaw(
-    std::uint32_t& outSrcIpv4Network,
-    std::uint16_t& outSrcPortHost,
-    void* buffer,
-    std::size_t bufferBytes
-) noexcept {
-    if (!bound_ || buffer == nullptr || bufferBytes == 0u) {
-        return 0u;
+void UdpGameTransport::purgeIngressForPeer(PeerId peer) noexcept {
+    if (peer == kInvalidPeerId || ingressCount_ == 0u) {
+        return;
     }
-    std::size_t len = 0u;
-    if (!socket_.tryRecvFrom(buffer, bufferBytes, len, outSrcIpv4Network, outSrcPortHost)) {
-        return 0u;
+    std::array<IngressEntry, kIngressQueueDepth> kept{};
+    std::size_t n = 0u;
+    for (std::size_t i = 0u; i < ingressCount_; ++i) {
+        std::size_t const idx = (ingressHead_ + i) % kIngressQueueDepth;
+        if (ingressQueue_[idx].from != peer && n < kIngressQueueDepth) {
+            kept[n] = ingressQueue_[idx];
+            ++n;
+        }
     }
-    return len;
+    for (std::size_t i = 0u; i < n; ++i) {
+        ingressQueue_[i] = kept[i];
+    }
+    ingressHead_ = 0u;
+    ingressCount_ = n;
+}
+
+void UdpGameTransport::forgetPeer(PeerId peer) noexcept {
+    if (peer == kInvalidPeerId) {
+        return;
+    }
+    PeerEntry* const e = findPeerById(peer);
+    if (e != nullptr) {
+        e->active = false;
+        e->id = kInvalidPeerId;
+        e->ipv4Network = 0u;
+        e->port = 0u;
+    }
+    purgeIngressForPeer(peer);
 }
 
 bool UdpGameTransport::send(PeerId to, void const* data, std::size_t len) noexcept {
@@ -165,18 +287,8 @@ std::size_t UdpGameTransport::receive(PeerId& outFrom, void* buffer, std::size_t
     if (!bound_ || buffer == nullptr || bufferBytes == 0u) {
         return 0u;
     }
-    std::size_t len = 0u;
-    std::uint32_t addr = 0u;
-    std::uint16_t port = 0u;
-    if (!socket_.tryRecvFrom(buffer, bufferBytes, len, addr, port)) {
-        return 0u;
-    }
-    PeerId const from = peerIdFromSource(addr, port);
-    if (from == kInvalidPeerId) {
-        return 0u;
-    }
-    outFrom = from;
-    return len;
+    pumpIngress();
+    return dequeueIngress(outFrom, buffer, bufferBytes);
 }
 
 } // namespace marble::gameplay

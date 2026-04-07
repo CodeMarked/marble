@@ -45,17 +45,15 @@ public:
         std::size_t len
     ) noexcept;
 
-    /// Next datagram from any source; does **not** require a peer table match. For handshake demux.
-    [[nodiscard]] std::size_t receiveRaw(
-        std::uint32_t& outSrcIpv4Network,
-        std::uint16_t& outSrcPortHost,
-        void* buffer,
-        std::size_t bufferBytes
-    ) noexcept;
-
     [[nodiscard]] bool send(PeerId to, void const* data, std::size_t len) noexcept override;
 
     [[nodiscard]] std::size_t receive(PeerId& outFrom, void* buffer, std::size_t bufferBytes) noexcept override;
+
+    void forgetPeer(PeerId peer) noexcept override;
+
+    /// Drain pending UDP datagrams into internal queues and assign peer IDs for unknown sources that send
+    /// a session Hello envelope. Optional explicit call before a batch of `receive`; `receive` pumps as well.
+    void pumpIngress() noexcept;
 
     [[nodiscard]] std::uint16_t localPort() const noexcept { return socket_.localPort(); }
 
@@ -72,9 +70,26 @@ private:
     [[nodiscard]] PeerEntry* findPeerById(PeerId id) noexcept;
     [[nodiscard]] PeerEntry const* findPeerById(PeerId id) const noexcept;
     [[nodiscard]] PeerId peerIdFromSource(std::uint32_t ipv4Network, std::uint16_t portHost) const noexcept;
+    [[nodiscard]] PeerId allocateJoinerPeerId() const noexcept;
+    [[nodiscard]] bool hasFreePeerSlot() const noexcept;
+    [[nodiscard]] bool tryEnqueueIngress(PeerId from, void const* data, std::size_t len) noexcept;
+    [[nodiscard]] std::size_t dequeueIngress(PeerId& outFrom, void* buffer, std::size_t bufferBytes) noexcept;
+    void purgeIngressForPeer(PeerId peer) noexcept;
+
+    static constexpr std::size_t kMaxDatagramBytes = 2048u;
+    static constexpr std::size_t kIngressQueueDepth = 48u;
+
+    struct IngressEntry {
+        PeerId from{kInvalidPeerId};
+        std::uint16_t len{};
+        std::array<std::uint8_t, kMaxDatagramBytes> bytes{};
+    };
 
     marble::platform::network::UdpSocket socket_{};
     std::array<PeerEntry, kMaxPeers> peers_{};
+    std::array<IngressEntry, kIngressQueueDepth> ingressQueue_{};
+    std::size_t ingressHead_{};
+    std::size_t ingressCount_{};
     bool bound_{};
 };
 
