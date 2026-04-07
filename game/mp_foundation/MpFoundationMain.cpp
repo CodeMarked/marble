@@ -1,9 +1,12 @@
-// Phase 3 narrow sample: UDP + session envelope (magic/version 2) + handshake + kinematics snapshots.
-// One socket for all datagrams (security: reject wrong magic/version before parsing body).
-// Protocol version 2: reliable framing available; this sample still uses unreliable handshake/snapshots.
+// Phase 3 sample: AuthoritativeSession + ClientSession over UDP.
+// Server discovers client via raw receive, then delegates to AuthoritativeSession.
+// Client uses ClientSession which handles Hello/retry, HelloAck, and snapshot ring buffer.
 
+#include "gameplay/AuthoritativeSession.hpp"
+#include "gameplay/ClientSession.hpp"
 #include "gameplay/MultiplayerSessionEnvelope.hpp"
 #include "gameplay/MultiplayerWireFormat.hpp"
+#include "gameplay/OnlineMultiplayerFoundation.hpp"
 #include "gameplay/UdpGameTransport.hpp"
 
 #include <array>
@@ -24,7 +27,7 @@ inline constexpr std::uint16_t kDefaultPort = 27777u;
 [[nodiscard]] int usage() {
     std::fprintf(
         stderr,
-        "mp_foundation — Marble Phase 3 transport sample (single UDP socket, framed messages)\n"
+        "mp_foundation — Marble Phase 3 transport sample (AuthoritativeSession + ClientSession)\n"
         "  server: mp_foundation --server [--port N] [--snapshot-ticks M]   (default port %u, ticks 120)\n"
         "  client: mp_foundation --client --host ADDR [--port N] [--expect-ticks M]\n",
         static_cast<unsigned>(kDefaultPort)
@@ -59,95 +62,99 @@ inline constexpr std::uint16_t kDefaultPort = 27777u;
         static_cast<unsigned>(kClientPeerId)
     );
 
-    bool hasClient = false;
-    std::uint32_t simTick = 0u;
-    std::uint32_t snapshotsSent = 0u;
-
-    auto lastSnapshot = std::chrono::steady_clock::now();
-    constexpr auto kSnapshotPeriod = std::chrono::milliseconds(50);
+    // Phase 1: discover client via raw receive (before session can route datagrams).
+    // ClientSession retries Hello; this consumes the first one for peer registration.
     auto const bootTime = std::chrono::steady_clock::now();
-
     std::array<std::uint8_t, 2048> rxBuf{};
-    std::array<std::uint8_t, 2048> txBuf{};
 
-    while (true) {
-        if (!hasClient && std::chrono::steady_clock::now() - bootTime > std::chrono::seconds(30)) {
+    for (;;) {
+        if (std::chrono::steady_clock::now() - bootTime > std::chrono::seconds(30)) {
             std::fprintf(stderr, "server: handshake timeout (no client in 30s)\n");
             return 1;
         }
-        if (hasClient && snapshotsSent >= snapshotTicks) {
-            break;
-        }
-        // Handshake + future input: accept any datagram first.
         std::uint32_t srcIp{};
         std::uint16_t srcPort{};
         std::size_t const n = transport.receiveRaw(srcIp, srcPort, rxBuf.data(), rxBuf.size());
-        if (n > 0u) {
-            SessionMessageType msgType{};
-            std::uint8_t const* payload{};
-            std::size_t payloadLen{};
-            if (!parseSessionEnvelope(rxBuf.data(), n, msgType, payload, payloadLen)) {
-                continue;
+        if (n == 0u) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
+        SessionMessageType msgType{};
+        std::uint8_t flags{};
+        std::uint8_t const* payload{};
+        std::size_t payloadLen{};
+        if (!parseSessionEnvelopeEx(rxBuf.data(), n, msgType, flags, payload, payloadLen)) {
+            continue;
+        }
+        if (msgType != SessionMessageType::Hello) {
+            continue;
+        }
+        if (!transport.addPeerEndpoint(kClientPeerId, srcIp, srcPort)) {
+            std::fprintf(stderr, "server: peer table full\n");
+            return 1;
+        }
+        std::fprintf(stderr, "server: discovered client endpoint, initializing session\n");
+        break;
+    }
+
+    // Phase 2: initialize AuthoritativeSession.
+    AuthoritativeSession<> session{};
+    SessionConfig config{};
+    config.mode = MultiplayerMode::DedicatedServer;
+    config.maxPlayers = 2u;
+    config.simulationHz = 60u;
+    config.snapshotHz = 20u;
+    if (!session.initialize(config, &transport)) {
+        std::fprintf(stderr, "server: session init failed\n");
+        return 1;
+    }
+
+    // Phase 3: tick loop — session handles Hello retry, HelloAck, and snapshot emission.
+    std::uint32_t const ticksPerSnapshot = config.simulationHz / config.snapshotHz;
+    std::uint32_t connectedAtTick = 0u;
+    bool wasConnected = false;
+    auto lastTime = std::chrono::steady_clock::now();
+
+    for (;;) {
+        auto const now = std::chrono::steady_clock::now();
+        float const dt = std::chrono::duration<float>(now - lastTime).count();
+        lastTime = now;
+
+        std::uint32_t const tick = session.currentTick();
+        static_cast<void>(session.setEntity(0, WorldObjectRef{0x1000u},
+            marble::math::Vec3{static_cast<float>(tick) * 0.01f, 0.f, 0.f},
+            marble::math::Vec3{1.f, 0.f, 0.f}));
+
+        session.tick(dt);
+
+        if (!wasConnected && session.peerCount() > 0u) {
+            wasConnected = true;
+            connectedAtTick = session.currentTick();
+            std::fprintf(stderr, "server: client connected at simTick %u\n", connectedAtTick);
+        }
+
+        if (wasConnected) {
+            std::uint32_t const elapsed = session.currentTick() - connectedAtTick;
+            std::uint32_t const approxSent = elapsed / ticksPerSnapshot;
+            if (approxSent > 0u && (approxSent % 20u) == 0u &&
+                elapsed % ticksPerSnapshot == 0u) {
+                std::fprintf(stderr, "server: ~%u snapshots (simTick=%u)\n",
+                    approxSent, session.currentTick());
             }
-            if (!hasClient && msgType == SessionMessageType::Hello) {
-                SessionHelloPayload hello{};
-                if (!readSessionHello(payload, payloadLen, hello)) {
-                    continue;
-                }
-                if (hello.clientUdpPortHost != srcPort) {
-                    // Basic source/port consistency (spoof hardening for LAN sample).
-                    continue;
-                }
-                if (!transport.addPeerEndpoint(kClientPeerId, srcIp, srcPort)) {
-                    std::fprintf(stderr, "server: peer table full\n");
-                    return 1;
-                }
-                SessionHelloAckPayload ack{};
-                ack.assignedPeerId = kClientPeerId;
-                ack.echoClientNonce = hello.clientNonce;
-                std::size_t const ackLen = writeSessionHelloAck(txBuf.data(), txBuf.size(), ack);
-                if (ackLen == 0u || !transport.sendRaw(srcIp, srcPort, txBuf.data(), ackLen)) {
-                    std::fprintf(stderr, "server: HelloAck send failed\n");
-                    return 1;
-                }
-                hasClient = true;
-                std::fprintf(stderr, "server: client handshake ok (nonce=%08x)\n", hello.clientNonce);
-                lastSnapshot = std::chrono::steady_clock::now();
+            if (approxSent >= snapshotTicks) {
+                break;
             }
         }
 
-        auto const now = std::chrono::steady_clock::now();
-        if (hasClient && snapshotsSent < snapshotTicks && (now - lastSnapshot) >= kSnapshotPeriod) {
-            lastSnapshot = now;
-            ++simTick;
-
-            EntityKinematicsSnapshot snap{};
-            snap.simTick = simTick;
-            snap.entity = {0x1000u};
-            snap.tier = PhysicsSimulationTier::Contact;
-            snap.positionLocal = {static_cast<float>(simTick) * 0.01f, 0.f, 0.f};
-            snap.linearVelocity = {1.f, 0.f, 0.f};
-
-            std::array<std::uint8_t, 128> inner{};
-            std::size_t const innerLen = writeEntityKinematicsSnapshot(inner.data(), inner.size(), snap);
-            if (innerLen == 0u) {
-                return 1;
-            }
-            std::size_t const frameLen = writeSessionGameSnapshot(txBuf.data(), txBuf.size(), inner.data(), innerLen);
-            if (frameLen == 0u || !transport.send(kClientPeerId, txBuf.data(), frameLen)) {
-                std::fprintf(stderr, "server: snapshot send failed at tick %u\n", simTick);
-                return 1;
-            }
-            ++snapshotsSent;
-            if ((snapshotsSent % 20u) == 0u) {
-                std::fprintf(stderr, "server: sent %u snapshots (simTick=%u)\n", snapshotsSent, simTick);
-            }
+        if (std::chrono::steady_clock::now() - bootTime > std::chrono::seconds(60)) {
+            std::fprintf(stderr, "server: overall timeout\n");
+            return 1;
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
-    std::fprintf(stderr, "server: done (sent %u snapshots)\n", snapshotsSent);
+    std::fprintf(stderr, "server: done (simTick=%u)\n", session.currentTick());
     return 0;
 }
 
@@ -162,104 +169,58 @@ inline constexpr std::uint16_t kDefaultPort = 27777u;
         return 1;
     }
 
-    std::uint32_t const nonce = 0xdeadbeefu;
-    SessionHelloPayload hello{};
-    hello.clientUdpPortHost = transport.localPort();
-    hello.clientNonce = nonce;
-
-    std::array<std::uint8_t, 256> txBuf{};
-    std::size_t const helloLen = writeSessionHello(txBuf.data(), txBuf.size(), hello);
-    if (helloLen == 0u || !transport.send(kServerPeerId, txBuf.data(), helloLen)) {
-        std::fprintf(stderr, "client: Hello send failed\n");
+    ClientSession<> client{};
+    if (!client.initialize(&transport, kServerPeerId, 60u, 0xdeadbeefu)) {
+        std::fprintf(stderr, "client: session init failed\n");
         return 1;
     }
-    std::fprintf(
-        stderr,
-        "client: Hello sent to %s:%u (local udp %u)\n",
-        host,
-        static_cast<unsigned>(serverPort),
-        static_cast<unsigned>(transport.localPort())
-    );
+    std::fprintf(stderr, "client: session initialized, connecting to %s:%u\n",
+        host, static_cast<unsigned>(serverPort));
 
-    bool acked = false;
-    std::array<std::uint8_t, 2048> rxBuf{};
-    auto const handshakeDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-
-    while (!acked && std::chrono::steady_clock::now() < handshakeDeadline) {
-        PeerId from{};
-        std::size_t const n = transport.receive(from, rxBuf.data(), rxBuf.size());
-        if (n == 0u) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            continue;
-        }
-        if (from != kServerPeerId) {
-            continue;
-        }
-        SessionMessageType t{};
-        std::uint8_t const* pl{};
-        std::size_t plen{};
-        if (!parseSessionEnvelope(rxBuf.data(), n, t, pl, plen) || t != SessionMessageType::HelloAck) {
-            continue;
-        }
-        SessionHelloAckPayload ack{};
-        if (!readSessionHelloAck(pl, plen, ack) || ack.echoClientNonce != nonce) {
-            std::fprintf(stderr, "client: bad HelloAck\n");
-            return 1;
-        }
-        if (ack.assignedPeerId != kClientPeerId) {
-            std::fprintf(stderr, "client: unexpected assigned peer id %u\n", static_cast<unsigned>(ack.assignedPeerId));
-            return 1;
-        }
-        acked = true;
-        std::fprintf(stderr, "client: HelloAck ok (assigned peer %u)\n", static_cast<unsigned>(ack.assignedPeerId));
-    }
-
-    if (!acked) {
-        std::fprintf(stderr, "client: handshake timeout\n");
-        return 1;
-    }
-
+    auto lastTime = std::chrono::steady_clock::now();
+    auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     std::uint32_t received = 0u;
-    auto const snapshotDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    std::size_t lastSnapshotCount = 0u;
 
     while (received < expectTicks) {
-        PeerId from{};
-        std::size_t const n = transport.receive(from, rxBuf.data(), rxBuf.size());
-        if (n == 0u) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            if (std::chrono::steady_clock::now() > snapshotDeadline) {
-                std::fprintf(stderr, "client: snapshot receive timeout\n");
-                return 1;
+        auto const now = std::chrono::steady_clock::now();
+        float const dt = std::chrono::duration<float>(now - lastTime).count();
+        lastTime = now;
+
+        client.tick(dt);
+
+        if (client.state() == ConnectionState::Connected) {
+            std::size_t const currentCount = client.snapshotCount();
+            if (currentCount > lastSnapshotCount) {
+                lastSnapshotCount = currentCount;
+
+                EntityKinematicsSnapshot snap{};
+                std::size_t const count = client.readLatestEntities(&snap, 1u);
+                if (count > 0u) {
+                    ++received;
+                    if ((received % 20u) == 1u || received == expectTicks) {
+                        std::fprintf(
+                            stderr,
+                            "client: snapshot #%u simTick=%u pos.x=%.4f\n",
+                            received,
+                            snap.simTick,
+                            static_cast<double>(snap.positionLocal.x)
+                        );
+                    }
+                }
             }
-            continue;
         }
-        if (from != kServerPeerId) {
-            continue;
+
+        if (now > deadline) {
+            std::fprintf(stderr, "client: snapshot receive timeout (got %u/%u)\n",
+                received, expectTicks);
+            return 1;
         }
-        std::uint8_t const* gamePl{};
-        std::size_t gameLen{};
-        if (!parseSessionGameSnapshot(rxBuf.data(), n, gamePl, gameLen)) {
-            continue;
-        }
-        EntityKinematicsSnapshot snap{};
-        if (!readEntityKinematicsSnapshot(gamePl, gameLen, snap)) {
-            continue;
-        }
-        ++received;
-        if ((received % 20u) == 1u || received == expectTicks) {
-            std::fprintf(
-                stderr,
-                "client: snapshot #%u simTick=%u pos.x=%.4f\n",
-                received,
-                snap.simTick,
-                static_cast<double>(snap.positionLocal.x)
-            );
-        }
-        if (received >= expectTicks) {
-            break;
-        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
+    client.disconnect();
     std::fprintf(stderr, "client: received %u snapshots — ok\n", received);
     return 0;
 }
