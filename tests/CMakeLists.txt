@@ -928,6 +928,48 @@ add_test(
     COMMAND udp_game_transport_integration_test
 )
 
+add_executable(udp_game_transport_hello_demux_test
+    udp_game_transport_hello_demux_test.cpp
+)
+
+target_link_libraries(udp_game_transport_hello_demux_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME udp_game_transport_hello_demux_test
+    COMMAND udp_game_transport_hello_demux_test
+)
+
+add_executable(authoritative_session_udp_two_clients_test
+    authoritative_session_udp_two_clients_test.cpp
+)
+
+target_link_libraries(authoritative_session_udp_two_clients_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME authoritative_session_udp_two_clients_test
+    COMMAND authoritative_session_udp_two_clients_test
+)
+
+add_executable(authoritative_session_udp_disconnect_test
+    authoritative_session_udp_disconnect_test.cpp
+)
+
+target_link_libraries(authoritative_session_udp_disconnect_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME authoritative_session_udp_disconnect_test
+    COMMAND authoritative_session_udp_disconnect_test
+)
+
 add_executable(multiplayer_session_envelope_test
     multiplayer_session_envelope_test.cpp
 )

@@ -29,7 +29,8 @@ enum class SessionMessageType : std::uint8_t {
     HelloAck = 2,
     GameSnapshot = 3,
     Ack = 4,
-    Disconnect = 5
+    Disconnect = 5,
+    ClientInput = 6
 };
 
 struct SessionHelloPayload {
@@ -284,6 +285,16 @@ inline constexpr std::size_t kSessionHelloAckPayloadBytes = 8u;
     outGamePayload = pl;
     outGameLen = plen;
     return true;
+}
+
+/// Wrap a [`ClientInputWirePayload`](MultiplayerWireFormat.hpp) as [`SessionMessageType::ClientInput`].
+[[nodiscard]] inline std::size_t writeSessionClientInput(
+    std::uint8_t* out,
+    std::size_t cap,
+    void const* inputPayload,
+    std::size_t inputPayloadBytes
+) noexcept {
+    return writeSessionEnvelope(out, cap, SessionMessageType::ClientInput, inputPayload, inputPayloadBytes);
 }
 
 } // namespace marble::gameplay

@@ -3,6 +3,7 @@
 #include "gameplay/GameTransport.hpp"
 #include "gameplay/InterestManagement.hpp"
 #include "gameplay/MultiplayerSessionEnvelope.hpp"
+#include "gameplay/MultiplayerWireFormat.hpp"
 #include "gameplay/ReliableChannel.hpp"
 
 #include <array>
@@ -44,7 +45,6 @@ public:
         simTick_ = 0u;
         tickAccumulator_ = 0.f;
         ticksSinceSnapshot_ = 0u;
-        nextPeerId_ = 2u;
         for (auto& ps : peerStates_) {
             ps = {};
         }
@@ -127,6 +127,27 @@ public:
         return findPeerState(peer);
     }
 
+    /// Latest client input received for a given peer (zero if none received yet).
+    /// The caller should consume and clear each tick to avoid re-applying stale input.
+    [[nodiscard]] ClientInputWirePayload const* latestInput(PeerId peer) const noexcept {
+        for (auto const& pi : peerInputs_) {
+            if (pi.peer == peer && pi.hasInput) {
+                return &pi.input;
+            }
+        }
+        return nullptr;
+    }
+
+    void clearInput(PeerId peer) noexcept {
+        for (auto& pi : peerInputs_) {
+            if (pi.peer == peer) {
+                pi.hasInput = false;
+                pi.input = {};
+                return;
+            }
+        }
+    }
+
     /// Enable per-peer AOI filtering. When enabled, `emitSnapshots` only sends entities
     /// within the peer's interest region. The view position is derived from the entity
     /// at `viewEntityIndex`.
@@ -158,6 +179,16 @@ private:
         PeerId peer{kInvalidPeerId};
         std::size_t viewEntityIndex{};
     };
+
+    void clearPeerInterest(PeerId peer) noexcept {
+        for (auto& pi : peerInterest_) {
+            if (pi.peer == peer) {
+                pi = {};
+                return;
+            }
+        }
+    }
+
     void processTransport() noexcept {
         std::array<std::uint8_t, kTransportBufSize> buf{};
         PeerId from{kInvalidPeerId};
@@ -210,6 +241,11 @@ private:
                     handleDisconnect(from, ps);
                 }
                 break;
+            case SessionMessageType::ClientInput:
+                if (ps != nullptr && ps->connectionState == ConnectionState::Connected) {
+                    handleClientInput(from, payload, payloadLen);
+                }
+                break;
             case SessionMessageType::HelloAck:
             case SessionMessageType::GameSnapshot:
                 break;
@@ -254,6 +290,33 @@ private:
         ps->active = false;
         ps->channel.reset();
         ps->connectionState = ConnectionState::Disconnected;
+        clearPeerInterest(from);
+        clearInput(from);
+        if (transport_ != nullptr) {
+            transport_->forgetPeer(from);
+        }
+    }
+
+    void handleClientInput(PeerId from, std::uint8_t const* payload, std::size_t payloadLen) noexcept {
+        ClientInputWirePayload inp{};
+        if (!readClientInputPayload(payload, payloadLen, inp)) {
+            return;
+        }
+        for (auto& pi : peerInputs_) {
+            if (pi.peer == from) {
+                pi.input = inp;
+                pi.hasInput = true;
+                return;
+            }
+        }
+        for (auto& pi : peerInputs_) {
+            if (pi.peer == kInvalidPeerId) {
+                pi.peer = from;
+                pi.input = inp;
+                pi.hasInput = true;
+                return;
+            }
+        }
     }
 
     void sendHelloAckReliable(PeerState* ps, PeerId to, std::uint32_t clientNonce) noexcept {
@@ -432,7 +495,6 @@ private:
     std::uint32_t simTick_{};
     float tickAccumulator_{};
     std::uint32_t ticksSinceSnapshot_{};
-    PeerId nextPeerId_{2u};
 
     std::array<PeerState, MaxPlayers> peerStates_{};
     std::array<ReplicatedEntity, kMaxEntities> entities_{};
@@ -440,6 +502,13 @@ private:
     bool aoiEnabled_{};
     float defaultAoiRadius_{500.f};
     std::array<PeerInterestEntry, MaxPlayers> peerInterest_{};
+
+    struct PeerInputEntry {
+        PeerId peer{kInvalidPeerId};
+        ClientInputWirePayload input{};
+        bool hasInput{};
+    };
+    std::array<PeerInputEntry, MaxPlayers> peerInputs_{};
 };
 
 } // namespace marble::gameplay

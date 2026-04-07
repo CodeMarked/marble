@@ -19,6 +19,9 @@ public:
 
     /// Pop one inbound datagram. Returns 0 if none. On success, sets `outFrom` and copies payload into `buffer`.
     [[nodiscard]] virtual std::size_t receive(PeerId& outFrom, void* buffer, std::size_t bufferBytes) noexcept = 0;
+
+    /// Release routing for a peer (e.g. after disconnect). Default: no-op (loopback and tests).
+    virtual void forgetPeer(PeerId peer) noexcept { (void)peer; }
 };
 
 /// Fixed-depth loopback queues between exactly two peers (tests and local simulation).
