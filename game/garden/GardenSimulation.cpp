@@ -806,10 +806,70 @@ void placeMarblesInArena(std::array<physics::RigidBodyKinematics, 2>& marbles, G
     marbles[0].invMass = invMass;
     marbles[1].invMass = invMass;
     float const halfSep = kArenaRadius * 0.35f;
-    float const y0 = gardenTerrainHeightAt(layout.terrain, -halfSep, 0.f) + kMarbleRadius + 0.001f;
-    float const y1 = gardenTerrainHeightAt(layout.terrain, halfSep, 0.f) + kMarbleRadius + 0.001f;
+    // Extra clearance above sampled terrain: static props sit on the heightfield but are not reflected in
+    // gardenTerrainHeightAt(); Jolt's heightfield can also sit slightly above the analytic samples after
+    // quantization. Without this, spheres can spawn embedded and appear stuck (no move / no jump).
+    constexpr float kSpawnExtraClearance = 0.12f;
+    float const y0 =
+        gardenTerrainHeightAt(layout.terrain, -halfSep, 0.f) + kMarbleRadius + kSpawnExtraClearance;
+    float const y1 =
+        gardenTerrainHeightAt(layout.terrain, halfSep, 0.f) + kMarbleRadius + kSpawnExtraClearance;
     marbles[0].position = {-halfSep, y0, 0.f};
     marbles[1].position = {halfSep, y1, 0.f};
+}
+
+bool gardenBallOnGround(
+    GardenLayout const& layout,
+    physics::RigidBodyKinematics const& ball,
+    float radius
+) noexcept {
+    if (ball.invMass <= 0.f) {
+        return false;
+    }
+    float const ty = gardenTerrainHeightAt(layout.terrain, ball.position.x, ball.position.z);
+    float const bottom = ball.position.y - radius;
+    if (ball.linearVelocity.y > 0.9f) {
+        return false;
+    }
+    return bottom <= ty + 0.36f;
+}
+
+namespace {
+
+[[nodiscard]] float jumpImpulseEase(float t) noexcept {
+    t = std::clamp(t, 0.f, 1.f);
+    constexpr float p1x = 0.26f;
+    constexpr float p1y = 0.02f;
+    constexpr float p2x = 0.72f;
+    constexpr float p2y = 0.985f;
+    auto bezierX = [](float u) -> float {
+        float const o = 1.f - u;
+        return 3.f * o * o * u * p1x + 3.f * o * u * u * p2x + u * u * u;
+    };
+    auto bezierY = [](float u) -> float {
+        float const o = 1.f - u;
+        return 3.f * o * o * u * p1y + 3.f * o * u * u * p2y + u * u * u;
+    };
+    float lo = 0.f;
+    float hi = 1.f;
+    for (int i = 0; i < 16; ++i) {
+        float const mid = 0.5f * (lo + hi);
+        if (bezierX(mid) < t) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    float const u = 0.5f * (lo + hi);
+    return bezierY(u);
+}
+
+} // namespace
+
+float gardenJumpImpulseFromHoldSeconds(float holdSeconds) noexcept {
+    float const t = std::clamp(holdSeconds / kGardenJumpChargeMaxSec, 0.f, 1.f);
+    float const s = jumpImpulseEase(t);
+    return kGardenJumpImpulseMin + (kGardenJumpImpulseMax - kGardenJumpImpulseMin) * s;
 }
 
 bool rayIntersectHorizontalPlane(

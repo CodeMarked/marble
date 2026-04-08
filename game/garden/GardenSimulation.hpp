@@ -21,8 +21,14 @@ inline constexpr float kArenaRadius = 7.f;
 inline constexpr float kMarbleRadius = 0.11f;
 /// Regulation mass 410–450 g at kickoff; nominal (kg). Use `invMass = 1.f / kPlayerBallMassKg` with SI forces.
 inline constexpr float kPlayerBallMassKg = 0.43f;
+/// Jump charge cap and impulse range (matches local `GardenGame` lawn jump).
+inline constexpr float kGardenJumpChargeMaxSec = 0.42f;
+inline constexpr float kGardenJumpImpulseMin = 1.55f;
+inline constexpr float kGardenJumpImpulseMax = 4.85f;
 /// Heightfield samples per side (128² vertices). Must align with Jolt heightfield block packing (power-of-two friendly).
 inline constexpr std::uint32_t kGardenTerrainSampleCount = 128u;
+/// Default `garden_server --seed` / remote-client layout seed; keep in sync with [`RemoteClientParams::layoutSeed`](GardenGame.hpp).
+inline constexpr std::uint32_t kGardenDedicatedServerDefaultLayoutSeed = 42u;
 
 /// Procedural ground height samples for render + Jolt static heightfield (`IPhysicsScene::addStaticHeightField`).
 /// Index `iz * sampleCount + ix` → world `(origin.x + ix * cellSize, height, origin.z + iz * cellSize)`.
@@ -127,6 +133,16 @@ void settleGardenDebrisInPlace(GardenLayout& layout) noexcept;
 
 /// Default starting poses: two marbles opposite in the arena, resting on the heightfield.
 void placeMarblesInArena(std::array<physics::RigidBodyKinematics, 2>& marbles, GardenLayout const& layout) noexcept;
+
+/// Rough grounded test vs heightfield (props may read as airborne; good enough for jump gating).
+[[nodiscard]] bool gardenBallOnGround(
+    GardenLayout const& layout,
+    physics::RigidBodyKinematics const& ball,
+    float radius
+) noexcept;
+
+/// Impulse magnitude (N·s style; scaled by `invMass` in [`applyImpulseLinear`]) from hold duration — same curve as local garden.
+[[nodiscard]] float gardenJumpImpulseFromHoldSeconds(float holdSeconds) noexcept;
 
 /// Ray vs solid sphere; `rayDir` need not be unit. Returns true and sets `outT` (distance along ray) if hit with t >= 0.
 [[nodiscard]] bool rayHitsSphere(
