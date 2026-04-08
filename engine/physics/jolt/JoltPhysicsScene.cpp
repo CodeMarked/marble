@@ -390,6 +390,9 @@ public:
         for (std::size_t i = 0; i < count; ++i) {
             BodyID const j = joltId(ids[i]);
             if (!j.IsInvalid()) {
+                // Host-authoritative games push velocities from gameplay each tick; waking ensures impulses
+                // and synced velocities apply even if Jolt put the body to sleep (e.g. after penetration).
+                iface.ActivateBody(j);
                 iface.SetLinearVelocity(j, toVec3(hostKinematics[i].linearVelocity));
             }
         }
