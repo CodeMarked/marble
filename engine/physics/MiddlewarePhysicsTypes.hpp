@@ -2,6 +2,7 @@
 
 #include "math/Geometry.hpp"
 #include "math/Vec3.hpp"
+#include "physics/CollisionMiddleware.hpp"
 
 #include <cstdint>
 #include <span>
@@ -25,6 +26,7 @@ struct PhysicsBodyMaterial {
 struct PhysicsStaticBoxDesc {
     math::Aabb bounds{};
     PhysicsBodyMaterial material{};
+    CollisionFilter filter{0xFFFFFFFFu, 0xFFFFFFFFu};
 };
 
 /// Static heightfield: Jolt surface `offset + scale * (ix, height[ix,iz], iz)` with `ix,iz ∈ [0, sampleCount-1]`.
@@ -35,6 +37,7 @@ struct PhysicsStaticHeightFieldDesc {
     std::uint32_t sampleCount{};
     std::span<float const> heights{};
     PhysicsBodyMaterial material{};
+    CollisionFilter filter{0xFFFFFFFFu, 0xFFFFFFFFu};
 };
 
 /// Dynamic sphere with game-authored pose and mass.
@@ -44,6 +47,19 @@ struct PhysicsDynamicSphereDesc {
     float radius = 0.11f;
     float invMass = 1.f;
     PhysicsBodyMaterial material{};
+    CollisionFilter filter{0xFFFFFFFFu, 0xFFFFFFFFu};
+};
+
+/// Dynamic capsule (cylinder with hemispherical caps) aligned along +Y.
+/// Total height = `2 * halfHeight + 2 * radius`.
+struct PhysicsDynamicCapsuleDesc {
+    math::Vec3 center{};
+    math::Vec3 linearVelocity{};
+    float halfHeight = 0.5f;
+    float radius = 0.25f;
+    float invMass = 1.f;
+    PhysicsBodyMaterial material{};
+    CollisionFilter filter{0xFFFFFFFFu, 0xFFFFFFFFu};
 };
 
 /// Optional horizontal cylinder about +Y through the origin: clamps body **center** after the solver (gameplay bounds).

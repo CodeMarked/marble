@@ -98,7 +98,7 @@ struct LandingState {
             idx
         );
         marble::ui::appendEasyFontTextPx(
-            "Choose Marbles, Garden, or Garden listen host (no network yet).",
+            "Choose a mode. Garden join connects to a garden_server.",
             48.f,
             80.f,
             fbW,
@@ -159,14 +159,14 @@ struct LandingState {
             idx
         );
         marble::ui::appendEasyFontTextPx(
-            "Load game",
+            "Garden - join server (127.0.0.1:27778)",
             56.f,
             static_cast<float>(kMenuRowBaseY + 3 * kMenuRowStep),
             fbW,
             fbH,
-            0.7f,
-            0.75f,
-            0.78f,
+            0.65f,
+            0.82f,
+            0.9f,
             vtx,
             idx
         );
@@ -252,8 +252,8 @@ struct LandingState {
                     outcome = PostLandingAction::GardenListenHost;
                     engine.requestEndRun();
                 } else if (selection == 3) {
-                    statusLine = "Load game: coming soon.";
-                    meshDirty = true;
+                    outcome = PostLandingAction::GardenRemoteClient;
+                    engine.requestEndRun();
                 } else {
                     outcome = PostLandingAction::Quit;
                     engine.requestClose();
@@ -394,7 +394,7 @@ int runWindowedGameLoop(
             return 0;
         }
         int const sessionRc =
-            runGameplaySession(engine, choice, shaderDirectory, physicalDeviceIndex);
+            runGameplaySession(engine, choice, shaderDirectory, physicalDeviceIndex, std::nullopt);
         if (sessionRc != 0) {
             return sessionRc;
         }
@@ -425,7 +425,8 @@ int runGameplaySession(
     Engine& engine,
     PostLandingAction mode,
     std::string const& shaderDirectory,
-    std::optional<std::uint32_t> physicalDeviceIndex
+    std::optional<std::uint32_t> physicalDeviceIndex,
+    std::optional<marble::garden_app::RemoteClientParams> gardenRemoteOptions
 ) {
     if (mode == PostLandingAction::Quit) {
         return 0;
@@ -441,9 +442,18 @@ int runGameplaySession(
         return engine.run();
     }
     using marble::garden_app::GardenSessionKind;
-    GardenSessionKind const gardenSession =
-        (mode == PostLandingAction::GardenListenHost) ? GardenSessionKind::ListenHost : GardenSessionKind::Offline;
-    marble::garden_app::GardenGame game(engine, gardenSession);
+    using marble::garden_app::RemoteClientParams;
+    GardenSessionKind gardenSession = GardenSessionKind::Offline;
+    RemoteClientParams clientParams{};
+    if (gardenRemoteOptions.has_value()) {
+        clientParams = *gardenRemoteOptions;
+    }
+    if (mode == PostLandingAction::GardenListenHost) {
+        gardenSession = GardenSessionKind::ListenHost;
+    } else if (mode == PostLandingAction::GardenRemoteClient) {
+        gardenSession = GardenSessionKind::RemoteClient;
+    }
+    marble::garden_app::GardenGame game(engine, gardenSession, clientParams);
     game.installPhases();
     if (engine.window() != nullptr) {
         if (!game.initGraphics(shaderDirectory, physicalDeviceIndex)) {

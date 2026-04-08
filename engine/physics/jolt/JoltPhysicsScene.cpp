@@ -2,6 +2,7 @@
 
 #include "math/Geometry.hpp"
 #include "math/Vec3.hpp"
+#include "physics/CollisionMiddleware.hpp"
 
 #include <Jolt/Jolt.h>
 
@@ -9,10 +10,14 @@
 #include <Jolt/Core/JobSystemThreadPool.h>
 #include <Jolt/Core/TempAllocator.h>
 #include <Jolt/RegisterTypes.h>
+#include <Jolt/Physics/Body/Body.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
+#include <Jolt/Physics/Body/BodyLock.h>
 #include <Jolt/Physics/Body/MotionQuality.h>
 #include <Jolt/Physics/Body/BodyInterface.h>
+#include <Jolt/Physics/Collision/ContactListener.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
+#include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Collision/Shape/HeightFieldShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/PhysicsSettings.h>
@@ -161,9 +166,39 @@ public:
     return u;
 }
 
+[[nodiscard]] constexpr std::uint64_t packFilter(marble::physics::CollisionFilter f) noexcept {
+    return (static_cast<std::uint64_t>(f.membershipLayers) << 32) |
+            static_cast<std::uint64_t>(f.collideAgainstMask);
+}
+
+[[nodiscard]] constexpr marble::physics::CollisionFilter unpackFilter(std::uint64_t ud) noexcept {
+    return {
+        static_cast<std::uint32_t>(ud >> 32),
+        static_cast<std::uint32_t>(ud & 0xFFFFFFFFu)
+    };
+}
+
+class CollisionFilterListener final : public ContactListener {
+public:
+    ValidateResult OnContactValidate(
+        Body const& inBody1,
+        Body const& inBody2,
+        [[maybe_unused]] RVec3Arg inBaseOffset,
+        [[maybe_unused]] CollideShapeResult const& inCollisionResult
+    ) override {
+        auto const f1 = unpackFilter(inBody1.GetUserData());
+        auto const f2 = unpackFilter(inBody2.GetUserData());
+        if (!marble::physics::filtersAllow(f1, f2)) {
+            return ValidateResult::RejectAllContactsForThisBodyPair;
+        }
+        return ValidateResult::AcceptAllContactsForThisBodyPair;
+    }
+};
+
 struct BodySlot {
     BodyID jolt{};
     bool in_use{};
+    bool is_dynamic{};
 };
 
 void applyCylindricalClampToCenter(math::Vec3& center, PhysicsCylindricalXZClamp const& clamp) noexcept {
@@ -217,6 +252,7 @@ public:
         BodyCreationSettings body_settings(shape, RVec3(c), Quat::sIdentity(), EMotionType::Static, Layers::NON_MOVING);
         body_settings.mRestitution = desc.material.restitution;
         body_settings.mFriction = desc.material.friction;
+        body_settings.mUserData = packFilter(desc.filter);
         BodyInterface& iface = impl_->physics_system.GetBodyInterface();
         Body* body = iface.CreateBody(body_settings);
         if (body == nullptr) {
@@ -246,6 +282,7 @@ public:
         BodyCreationSettings body_settings(shape, RVec3::sZero(), Quat::sIdentity(), EMotionType::Static, Layers::NON_MOVING);
         body_settings.mRestitution = desc.material.restitution;
         body_settings.mFriction = desc.material.friction;
+        body_settings.mUserData = packFilter(desc.filter);
         BodyInterface& iface = impl_->physics_system.GetBodyInterface();
         Body* body = iface.CreateBody(body_settings);
         if (body == nullptr) {
@@ -279,13 +316,50 @@ public:
         bs.mMassPropertiesOverride.mMass =
             desc.invMass > 0.f ? (1.f / desc.invMass) : 1.f;
         bs.mMotionQuality = EMotionQuality::LinearCast;
+        bs.mAllowSleeping = sleepingEnabled_;
+        bs.mUserData = packFilter(desc.filter);
         BodyInterface& iface = impl_->physics_system.GetBodyInterface();
         BodyID const id = iface.CreateAndAddBody(bs, EActivation::Activate);
         if (id.IsInvalid()) {
             return kInvalidPhysicsBodyId;
         }
         iface.SetLinearVelocity(id, toVec3(desc.linearVelocity));
-        slots_.push_back(BodySlot{id, true});
+        slots_.push_back(BodySlot{id, true, true});
+        return static_cast<PhysicsBodyId>(slots_.size());
+    }
+
+    PhysicsBodyId addDynamicCapsule(PhysicsDynamicCapsuleDesc const& desc) override {
+        CapsuleShapeSettings capsule_settings(desc.halfHeight, desc.radius);
+        capsule_settings.SetEmbedded();
+        ShapeSettings::ShapeResult sr = capsule_settings.Create();
+        if (sr.HasError()) {
+            return kInvalidPhysicsBodyId;
+        }
+        ShapeRefC shape = sr.Get();
+        BodyCreationSettings bs(
+            shape,
+            toRVec3(desc.center),
+            Quat::sIdentity(),
+            EMotionType::Dynamic,
+            Layers::MOVING
+        );
+        bs.mRestitution = desc.material.restitution;
+        bs.mFriction = desc.material.friction;
+        bs.mLinearDamping = desc.material.linearDamping;
+        bs.mAngularDamping = desc.material.angularDamping;
+        bs.mOverrideMassProperties = EOverrideMassProperties::CalculateInertia;
+        bs.mMassPropertiesOverride.mMass =
+            desc.invMass > 0.f ? (1.f / desc.invMass) : 1.f;
+        bs.mMotionQuality = EMotionQuality::LinearCast;
+        bs.mAllowSleeping = sleepingEnabled_;
+        bs.mUserData = packFilter(desc.filter);
+        BodyInterface& iface = impl_->physics_system.GetBodyInterface();
+        BodyID const id = iface.CreateAndAddBody(bs, EActivation::Activate);
+        if (id.IsInvalid()) {
+            return kInvalidPhysicsBodyId;
+        }
+        iface.SetLinearVelocity(id, toVec3(desc.linearVelocity));
+        slots_.push_back(BodySlot{id, true, true});
         return static_cast<PhysicsBodyId>(slots_.size());
     }
 
@@ -316,6 +390,9 @@ public:
         for (std::size_t i = 0; i < count; ++i) {
             BodyID const j = joltId(ids[i]);
             if (!j.IsInvalid()) {
+                // Host-authoritative games push velocities from gameplay each tick; waking ensures impulses
+                // and synced velocities apply even if Jolt put the body to sleep (e.g. after penetration).
+                iface.ActivateBody(j);
                 iface.SetLinearVelocity(j, toVec3(hostKinematics[i].linearVelocity));
             }
         }
@@ -341,7 +418,26 @@ public:
             ps.mSpeculativeContactDistance = 0.02f;
             ps.mLinearCastThreshold = 0.75f;
         }
-        (void)settings.enableSleeping;
+        if (settings.enableSleeping != sleepingEnabled_) {
+            sleepingEnabled_ = settings.enableSleeping;
+            BodyLockInterface const& lockIf = impl_->physics_system.GetBodyLockInterface();
+            for (BodySlot const& s : slots_) {
+                if (s.in_use && s.is_dynamic && !s.jolt.IsInvalid()) {
+                    BodyLockWrite lock(lockIf, s.jolt);
+                    if (lock.Succeeded()) {
+                        lock.GetBody().SetAllowSleeping(sleepingEnabled_);
+                    }
+                }
+            }
+            if (!sleepingEnabled_) {
+                BodyInterface& bodyIf = impl_->physics_system.GetBodyInterface();
+                for (BodySlot const& s : slots_) {
+                    if (s.in_use && s.is_dynamic && !s.jolt.IsInvalid()) {
+                        bodyIf.ActivateBody(s.jolt);
+                    }
+                }
+            }
+        }
         impl_->physics_system.SetPhysicsSettings(ps);
 
         unsigned const collisionSteps =
@@ -396,6 +492,22 @@ public:
         iface.SetAngularVelocity(j, Vec3::sZero());
     }
 
+    void applyLinearImpulse(PhysicsBodyId id, math::Vec3 impulse) override {
+        BodyID const j = joltId(id);
+        if (j.IsInvalid()) {
+            return;
+        }
+        impl_->physics_system.GetBodyInterface().AddImpulse(j, toVec3(impulse));
+    }
+
+    void setBodyLinearVelocity(PhysicsBodyId id, math::Vec3 linearVelocity) override {
+        BodyID const j = joltId(id);
+        if (j.IsInvalid()) {
+            return;
+        }
+        impl_->physics_system.GetBodyInterface().SetLinearVelocity(j, toVec3(linearVelocity));
+    }
+
     void activateBody(PhysicsBodyId id) override {
         BodyID const j = joltId(id);
         if (j.IsInvalid()) {
@@ -441,6 +553,7 @@ private:
         ObjectLayerPairFilterImpl object_pair_filter{};
         BPLayerInterfaceImpl broad_phase_layer_interface{};
         ObjectVsBroadPhaseLayerFilterImpl object_vs_broadphase_layer_filter{};
+        CollisionFilterListener contact_listener{};
         JobSystemThreadPool job_system;
         PhysicsSystem physics_system{};
 
@@ -462,11 +575,13 @@ private:
                 object_vs_broadphase_layer_filter,
                 object_pair_filter
             );
+            physics_system.SetContactListener(&contact_listener);
         }
     };
 
     std::unique_ptr<Impl> impl_;
     std::vector<BodySlot> slots_;
+    bool sleepingEnabled_{};
 };
 
 } // namespace

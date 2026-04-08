@@ -1,13 +1,14 @@
 #pragma once
 
 #include "core/Engine.hpp"
+#include "garden/GardenGame.hpp"
 
 #include <optional>
 #include <string>
 
 namespace marble::marbles_app {
 
-enum class PostLandingAction { Quit, Marbles, Garden, GardenListenHost };
+enum class PostLandingAction { Quit, Marbles, Garden, GardenListenHost, GardenRemoteClient };
 
 /// Windowed: main menu then Marbles or Garden in a loop; Esc pause, then Q returns to this menu; window close exits.
 [[nodiscard]] int runWindowedGameLoop(
@@ -28,7 +29,8 @@ enum class PostLandingAction { Quit, Marbles, Garden, GardenListenHost };
     core::Engine& engine,
     PostLandingAction mode,
     std::string const& shaderDirectory,
-    std::optional<std::uint32_t> physicalDeviceIndex
+    std::optional<std::uint32_t> physicalDeviceIndex,
+    std::optional<marble::garden_app::RemoteClientParams> gardenRemoteOptions = std::nullopt
 );
 
 } // namespace marble::marbles_app

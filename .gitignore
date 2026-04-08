@@ -1,14 +1,37 @@
+# --- CMake / Ninja / presets ---
+# Presets use ${sourceDir}/build/vs-<presetName> (see CMakePresets.json).
 build/
 out/
-marble/
+cmake-build-*/
+
+# Accidental in-source configure at repo root (e.g. cmake -S . -B .)
+/CMakeCache.txt
+/CMakeFiles/
+
+# --- Visual Studio / MSVC (user-local or generator output) ---
 .vs/
-.vscode/
-.cursor/
 *.user
 *.suo
 *.sln
 *.vcxproj*
+*.sdf
+*.opensdf
+
+# --- Other IDEs ---
+.idea/
+
+# --- Editor / agent (project-local) ---
+.vscode/
+.cursor/
+
+# Regenerate locally if your tooling needs it (CMake can write this to build/).
 compile_commands.json
+
+# --- Local logs and scratch output ---
+*.log
 
 # Optional documentation / notes alongside the tree
 docs/
+
+# Local sibling/overlay folders (packaging experiments, alternate checkouts)
+marble/

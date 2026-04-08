@@ -409,6 +409,34 @@ add_test(
     COMMAND garden_simulation_test
 )
 
+add_executable(jolt_sleeping_test
+    jolt_sleeping_test.cpp
+)
+
+target_link_libraries(jolt_sleeping_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME jolt_sleeping_test
+    COMMAND jolt_sleeping_test
+)
+
+add_executable(jolt_collision_filter_test
+    jolt_collision_filter_test.cpp
+)
+
+target_link_libraries(jolt_collision_filter_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME jolt_collision_filter_test
+    COMMAND jolt_collision_filter_test
+)
+
 add_executable(time_policy_test
     time_policy_test.cpp
 )
@@ -858,6 +886,160 @@ add_test(
     COMMAND online_multiplayer_foundation_test
 )
 
+add_executable(multiplayer_wire_format_test
+    multiplayer_wire_format_test.cpp
+)
+
+target_link_libraries(multiplayer_wire_format_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME multiplayer_wire_format_test
+    COMMAND multiplayer_wire_format_test
+)
+
+add_executable(loopback_game_transport_test
+    loopback_game_transport_test.cpp
+)
+
+target_link_libraries(loopback_game_transport_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME loopback_game_transport_test
+    COMMAND loopback_game_transport_test
+)
+
+add_executable(udp_game_transport_integration_test
+    udp_game_transport_integration_test.cpp
+)
+
+target_link_libraries(udp_game_transport_integration_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME udp_game_transport_integration_test
+    COMMAND udp_game_transport_integration_test
+)
+
+add_executable(udp_game_transport_hello_demux_test
+    udp_game_transport_hello_demux_test.cpp
+)
+
+target_link_libraries(udp_game_transport_hello_demux_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME udp_game_transport_hello_demux_test
+    COMMAND udp_game_transport_hello_demux_test
+)
+
+add_executable(authoritative_session_udp_two_clients_test
+    authoritative_session_udp_two_clients_test.cpp
+)
+
+target_link_libraries(authoritative_session_udp_two_clients_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME authoritative_session_udp_two_clients_test
+    COMMAND authoritative_session_udp_two_clients_test
+)
+
+add_executable(authoritative_session_udp_disconnect_test
+    authoritative_session_udp_disconnect_test.cpp
+)
+
+target_link_libraries(authoritative_session_udp_disconnect_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME authoritative_session_udp_disconnect_test
+    COMMAND authoritative_session_udp_disconnect_test
+)
+
+add_executable(multiplayer_session_envelope_test
+    multiplayer_session_envelope_test.cpp
+)
+
+target_link_libraries(multiplayer_session_envelope_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME multiplayer_session_envelope_test
+    COMMAND multiplayer_session_envelope_test
+)
+
+add_executable(reliable_channel_test
+    reliable_channel_test.cpp
+)
+
+target_link_libraries(reliable_channel_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME reliable_channel_test
+    COMMAND reliable_channel_test
+)
+
+add_executable(reliable_envelope_test
+    reliable_envelope_test.cpp
+)
+
+target_link_libraries(reliable_envelope_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME reliable_envelope_test
+    COMMAND reliable_envelope_test
+)
+
+add_executable(authoritative_session_test
+    authoritative_session_test.cpp
+)
+
+target_link_libraries(authoritative_session_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME authoritative_session_test
+    COMMAND authoritative_session_test
+)
+
+add_executable(snapshot_interpolator_test
+    snapshot_interpolator_test.cpp
+)
+
+target_link_libraries(snapshot_interpolator_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME snapshot_interpolator_test
+    COMMAND snapshot_interpolator_test
+)
+
 add_executable(scripting_game_flow_test
     scripting_game_flow_test.cpp
 )
@@ -870,6 +1052,49 @@ PRIVATE
 add_test(
     NAME scripting_game_flow_test
     COMMAND scripting_game_flow_test
+)
+
+add_executable(jolt_dynamic_capsule_test
+    jolt_dynamic_capsule_test.cpp
+)
+
+target_link_libraries(jolt_dynamic_capsule_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME jolt_dynamic_capsule_test
+    COMMAND jolt_dynamic_capsule_test
+)
+
+add_executable(interest_management_test
+    interest_management_test.cpp
+)
+
+target_link_libraries(interest_management_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME interest_management_test
+    COMMAND interest_management_test
+)
+
+add_executable(garden_server_smoke_test
+    garden_server_smoke_test.cpp
+)
+
+target_link_libraries(garden_server_smoke_test
+PRIVATE
+    engine
+    garden_sim
+)
+
+add_test(
+    NAME garden_server_smoke_test
+    COMMAND garden_server_smoke_test
 )
 
 if(TARGET Jolt)
