@@ -17,6 +17,10 @@ using marble::gameplay::localGameplayHeightFieldToJolt;
 using marble::gameplay::localGameplayToJolt;
 using marble::garden::GardenLayout;
 using marble::garden::buildGardenLayout;
+using marble::garden::gardenBallOnGround;
+using marble::garden::gardenJumpImpulseFromHoldSeconds;
+using marble::garden::kGardenJumpImpulseMax;
+using marble::garden::kGardenJumpImpulseMin;
 using marble::garden::kGardenRadius;
 using marble::garden::kMarbleRadius;
 using marble::garden::placeMarblesInArena;
@@ -109,6 +113,27 @@ int main() {
         layout.propMesh.size() != layout.staticColliders.size() ||
         layout.propYaw.size() != layout.staticColliders.size()) {
         return 1;
+    }
+
+    {
+        std::array<RigidBodyKinematics, 2> marblesGround{};
+        placeMarblesInArena(marblesGround, layout);
+        if (!gardenBallOnGround(layout, marblesGround[0], kMarbleRadius)) {
+            return 12;
+        }
+        RigidBodyKinematics air = marblesGround[0];
+        air.position.y += 50.f;
+        if (gardenBallOnGround(layout, air, kMarbleRadius)) {
+            return 13;
+        }
+        float const impShort = gardenJumpImpulseFromHoldSeconds(0.02f);
+        if (impShort < kGardenJumpImpulseMin || impShort > kGardenJumpImpulseMax) {
+            return 14;
+        }
+        float const impLong = gardenJumpImpulseFromHoldSeconds(100.f);
+        if (impLong < kGardenJumpImpulseMax * 0.99f || impLong > kGardenJumpImpulseMax * 1.01f) {
+            return 15;
+        }
     }
 
     float t = 0.f;
