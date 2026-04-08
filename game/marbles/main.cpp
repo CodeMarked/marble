@@ -2,9 +2,11 @@
 
 #include "core/Engine.hpp"
 #include "core/Log.hpp"
+#include "garden/GardenSimulation.hpp"
 #include "platform/paths/ExecutableDir.hpp"
 
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <limits>
 #include <optional>
@@ -26,6 +28,7 @@ int main(int argc, char** argv)
     std::optional<std::uint32_t> physicalDeviceIndex;
     std::string joinHost;
     std::uint16_t joinPort = 27778u;
+    std::uint32_t joinSeed = marble::garden::kGardenDedicatedServerDefaultLayoutSeed;
     bool joinMode = false;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -50,6 +53,17 @@ int main(int argc, char** argv)
                 (void)logPrintf(0, kGeneral, "Invalid value for --join-port");
                 return 2;
             }
+            continue;
+        }
+        if (arg == "--join-seed" && (i + 1) < argc) {
+            char const* s = argv[++i];
+            char* end{};
+            unsigned long const v = std::strtoul(s, &end, 10);
+            if (end == s || *end != '\0' || v > 4294967295ul) {
+                (void)logPrintf(0, kGeneral, "Invalid value for --join-seed");
+                return 2;
+            }
+            joinSeed = static_cast<std::uint32_t>(v);
             continue;
         }
         if (arg == "--assets" && (i + 1) < argc) {
@@ -107,11 +121,18 @@ int main(int argc, char** argv)
         std::string const shaderDir = (exeDir / "shaders").string();
 
         if (joinMode) {
+            marble::garden_app::RemoteClientParams joinOpts{};
+            if (!joinHost.empty()) {
+                joinOpts.host = std::move(joinHost);
+            }
+            joinOpts.port = joinPort;
+            joinOpts.layoutSeed = joinSeed;
             exitCode = marble::marbles_app::runGameplaySession(
                 engine,
                 marble::marbles_app::PostLandingAction::GardenRemoteClient,
                 shaderDir,
-                physicalDeviceIndex
+                physicalDeviceIndex,
+                std::make_optional(std::move(joinOpts))
             );
         } else if (config.headless) {
             exitCode = marble::marbles_app::runGameplaySession(

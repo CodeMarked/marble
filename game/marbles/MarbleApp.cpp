@@ -394,7 +394,7 @@ int runWindowedGameLoop(
             return 0;
         }
         int const sessionRc =
-            runGameplaySession(engine, choice, shaderDirectory, physicalDeviceIndex);
+            runGameplaySession(engine, choice, shaderDirectory, physicalDeviceIndex, std::nullopt);
         if (sessionRc != 0) {
             return sessionRc;
         }
@@ -425,7 +425,8 @@ int runGameplaySession(
     Engine& engine,
     PostLandingAction mode,
     std::string const& shaderDirectory,
-    std::optional<std::uint32_t> physicalDeviceIndex
+    std::optional<std::uint32_t> physicalDeviceIndex,
+    std::optional<marble::garden_app::RemoteClientParams> gardenRemoteOptions
 ) {
     if (mode == PostLandingAction::Quit) {
         return 0;
@@ -444,6 +445,9 @@ int runGameplaySession(
     using marble::garden_app::RemoteClientParams;
     GardenSessionKind gardenSession = GardenSessionKind::Offline;
     RemoteClientParams clientParams{};
+    if (gardenRemoteOptions.has_value()) {
+        clientParams = *gardenRemoteOptions;
+    }
     if (mode == PostLandingAction::GardenListenHost) {
         gardenSession = GardenSessionKind::ListenHost;
     } else if (mode == PostLandingAction::GardenRemoteClient) {
