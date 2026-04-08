@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/Engine.hpp"
+#include "garden/GardenGame.hpp"
 
 #include <optional>
 #include <string>
@@ -28,7 +29,8 @@ enum class PostLandingAction { Quit, Marbles, Garden, GardenListenHost, GardenRe
     core::Engine& engine,
     PostLandingAction mode,
     std::string const& shaderDirectory,
-    std::optional<std::uint32_t> physicalDeviceIndex
+    std::optional<std::uint32_t> physicalDeviceIndex,
+    std::optional<marble::garden_app::RemoteClientParams> gardenRemoteOptions = std::nullopt
 );
 
 } // namespace marble::marbles_app

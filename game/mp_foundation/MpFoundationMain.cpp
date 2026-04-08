@@ -1,10 +1,9 @@
 // Phase 3 sample: AuthoritativeSession + ClientSession over UDP.
-// Server discovers client via raw receive, then delegates to AuthoritativeSession.
+// Server binds, initializes the session, and relies on UdpGameTransport Hello demux for peer registration.
 // Client uses ClientSession which handles Hello/retry, HelloAck, and snapshot ring buffer.
 
 #include "gameplay/AuthoritativeSession.hpp"
 #include "gameplay/ClientSession.hpp"
-#include "gameplay/MultiplayerSessionEnvelope.hpp"
 #include "gameplay/MultiplayerWireFormat.hpp"
 #include "gameplay/OnlineMultiplayerFoundation.hpp"
 #include "gameplay/UdpGameTransport.hpp"
@@ -62,42 +61,6 @@ inline constexpr std::uint16_t kDefaultPort = 27777u;
         static_cast<unsigned>(kClientPeerId)
     );
 
-    // Phase 1: discover client via raw receive (before session can route datagrams).
-    // ClientSession retries Hello; this consumes the first one for peer registration.
-    auto const bootTime = std::chrono::steady_clock::now();
-    std::array<std::uint8_t, 2048> rxBuf{};
-
-    for (;;) {
-        if (std::chrono::steady_clock::now() - bootTime > std::chrono::seconds(30)) {
-            std::fprintf(stderr, "server: handshake timeout (no client in 30s)\n");
-            return 1;
-        }
-        std::uint32_t srcIp{};
-        std::uint16_t srcPort{};
-        std::size_t const n = transport.receiveRaw(srcIp, srcPort, rxBuf.data(), rxBuf.size());
-        if (n == 0u) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            continue;
-        }
-        SessionMessageType msgType{};
-        std::uint8_t flags{};
-        std::uint8_t const* payload{};
-        std::size_t payloadLen{};
-        if (!parseSessionEnvelopeEx(rxBuf.data(), n, msgType, flags, payload, payloadLen)) {
-            continue;
-        }
-        if (msgType != SessionMessageType::Hello) {
-            continue;
-        }
-        if (!transport.addPeerEndpoint(kClientPeerId, srcIp, srcPort)) {
-            std::fprintf(stderr, "server: peer table full\n");
-            return 1;
-        }
-        std::fprintf(stderr, "server: discovered client endpoint, initializing session\n");
-        break;
-    }
-
-    // Phase 2: initialize AuthoritativeSession.
     AuthoritativeSession<> session{};
     SessionConfig config{};
     config.mode = MultiplayerMode::DedicatedServer;
@@ -109,7 +72,9 @@ inline constexpr std::uint16_t kDefaultPort = 27777u;
         return 1;
     }
 
-    // Phase 3: tick loop — session handles Hello retry, HelloAck, and snapshot emission.
+    auto const bootTime = std::chrono::steady_clock::now();
+
+    // Tick loop — UdpGameTransport demuxes unknown Hello into peer rows; session handles HelloAck and snapshots.
     std::uint32_t const ticksPerSnapshot = config.simulationHz / config.snapshotHz;
     std::uint32_t connectedAtTick = 0u;
     bool wasConnected = false;
@@ -126,6 +91,13 @@ inline constexpr std::uint16_t kDefaultPort = 27777u;
             marble::math::Vec3{1.f, 0.f, 0.f}));
 
         session.tick(dt);
+
+        if (session.peerCount() == 0u) {
+            if (std::chrono::steady_clock::now() - bootTime > std::chrono::seconds(30)) {
+                std::fprintf(stderr, "server: handshake timeout (no client in 30s)\n");
+                return 1;
+            }
+        }
 
         if (!wasConnected && session.peerCount() > 0u) {
             wasConnected = true;
