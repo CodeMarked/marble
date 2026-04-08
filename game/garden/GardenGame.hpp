@@ -22,6 +22,9 @@ enum class GardenSessionKind : std::uint8_t {
 struct RemoteClientParams {
     std::string host = "127.0.0.1";
     std::uint16_t port = 27778u;
+    /// Procedural garden layout; **must** match the dedicated server's `--seed` or the ball will look buried
+    /// and the world will not match snapshots (`marble::garden::kGardenDedicatedServerDefaultLayoutSeed`).
+    std::uint32_t layoutSeed = 42u;
 };
 
 /// Phase-1 sample: fixed-step garden physics, two marbles, third-person camera, mouse flick.
