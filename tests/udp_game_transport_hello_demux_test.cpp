@@ -43,7 +43,14 @@ int main() {
 
     PeerId from{kInvalidPeerId};
     std::array<std::uint8_t, 2048> rx{};
-    std::size_t const n1 = server.receive(from, rx.data(), rx.size());
+    constexpr int kMaxSpins = 100000;
+    std::size_t n1 = 0u;
+    for (int spin = 0; spin < kMaxSpins; ++spin) {
+        n1 = server.receive(from, rx.data(), rx.size());
+        if (n1 != 0u) {
+            break;
+        }
+    }
     if (n1 == 0u || from != 2u) {
         return 6;
     }
@@ -71,7 +78,13 @@ int main() {
         }
     }
 
-    std::size_t const n2 = server.receive(from, rx.data(), rx.size());
+    std::size_t n2 = 0u;
+    for (int spin = 0; spin < kMaxSpins; ++spin) {
+        n2 = server.receive(from, rx.data(), rx.size());
+        if (n2 != 0u) {
+            break;
+        }
+    }
     if (n2 == 0u || from != 3u) {
         return 10;
     }

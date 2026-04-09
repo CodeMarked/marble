@@ -346,7 +346,15 @@ void destroySwapchainOnly(VulkanRhiImpl& d) {
     for (auto const& e : ext) {
         names.insert(e.extensionName);
     }
-    return names.count(VK_KHR_SWAPCHAIN_EXTENSION_NAME) > 0;
+    if (names.count(VK_KHR_SWAPCHAIN_EXTENSION_NAME) == 0) {
+        return false;
+    }
+#if defined(__APPLE__)
+    if (names.count(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME) == 0) {
+        return false;
+    }
+#endif
+    return true;
 }
 
 [[nodiscard]] VkShaderModule makeShaderModule(VkDevice device, std::vector<std::uint32_t> const& code) {
@@ -905,6 +913,21 @@ bool createRenderPassAndPipeline(VulkanRhiImpl& impl) {
     extensions.push_back(debugExt);
 #endif
 
+#if defined(__APPLE__)
+    {
+        bool havePortEnum = false;
+        for (char const* e : extensions) {
+            if (std::strcmp(e, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 0) {
+                havePortEnum = true;
+                break;
+            }
+        }
+        if (!havePortEnum) {
+            extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+        }
+    }
+#endif
+
 #if MARBLE_VK_ENABLE_VALIDATION
     char const* layers[] = {"VK_LAYER_KHRONOS_validation"};
 #endif
@@ -922,6 +945,9 @@ bool createRenderPassAndPipeline(VulkanRhiImpl& impl) {
     ici.pApplicationInfo = &ai;
     ici.enabledExtensionCount = static_cast<std::uint32_t>(extensions.size());
     ici.ppEnabledExtensionNames = extensions.data();
+#if defined(__APPLE__)
+    ici.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+#endif
 #if MARBLE_VK_ENABLE_VALIDATION
     ici.enabledLayerCount = 1;
     ici.ppEnabledLayerNames = layers;
@@ -1011,12 +1037,21 @@ bool createRenderPassAndPipeline(VulkanRhiImpl& impl) {
         q.pQueuePriorities = &priority;
         qcis.push_back(q);
     }
+#if defined(__APPLE__)
+    char const* devExt[] = {
+        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+        VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME,
+    };
+    std::uint32_t const devExtCount = 2;
+#else
     char const* devExt[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+    std::uint32_t const devExtCount = 1;
+#endif
     VkDeviceCreateInfo deviceCi{};
     deviceCi.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     deviceCi.queueCreateInfoCount = static_cast<std::uint32_t>(qcis.size());
     deviceCi.pQueueCreateInfos = qcis.data();
-    deviceCi.enabledExtensionCount = 1;
+    deviceCi.enabledExtensionCount = devExtCount;
     deviceCi.ppEnabledExtensionNames = devExt;
     if (vkCreateDevice(d.physicalDevice, &deviceCi, nullptr, &d.device) != VK_SUCCESS) {
         return false;

@@ -37,6 +37,11 @@ std::unique_ptr<Window> Window::create(const std::string& title, int width, int 
     static bool glfwInitialized = false;
     if (!glfwInitialized) {
         glfwSetErrorCallback(onError);
+        // GLFW dlopen("libvulkan.1.dylib") often fails when the app already linked the loader
+        // via a full path (e.g. Homebrew). Reuse the same entry point as our Vulkan link.
+#if GLFW_VERSION_MAJOR > 3 || (GLFW_VERSION_MAJOR == 3 && GLFW_VERSION_MINOR >= 4)
+        glfwInitVulkanLoader(vkGetInstanceProcAddr);
+#endif
         if (glfwInit() != GLFW_TRUE) {
             return nullptr;
         }

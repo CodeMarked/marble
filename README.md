@@ -24,21 +24,52 @@ cmake --build --preset build-release
 
 Outputs go under `build\vs-debug\` and `build\vs-release\` (multi-config Visual Studio generator).
 
+### macOS / Linux (Ninja, single-config)
+
+From the project root (CMake 3.20+, **Ninja**, Vulkan + **`glslc`** on `PATH` — e.g. Homebrew `vulkan-headers`, `vulkan-loader`, `shaderc`, with `CMAKE_PREFIX_PATH` pointing at that prefix):
+
+**Debug**
+
+```bash
+cmake -S . -B build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_PREFIX_PATH=/usr/local
+cmake --build build
+```
+
+On **macOS**, if the build fails with an undefined `VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME` in `VulkanRhi.cpp` (MoltenVK / portability subset in headers), reconfigure with beta Vulkan extensions enabled:
+
+```bash
+cmake -S . -B build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_PREFIX_PATH=/usr/local \
+  -DCMAKE_CXX_FLAGS=-DVK_ENABLE_BETA_EXTENSIONS
+```
+
+Use `/opt/homebrew` instead of `/usr/local` for **Apple Silicon** Homebrew if that is where Vulkan and `shaderc` are installed.
+
+**Release:** set `-DCMAKE_BUILD_TYPE=Release` instead of `Debug`.
+
 ### Compiler policy (Marble targets)
 
 Engine, game, and tests inherit shared flags from [`cmake/MarbleCompileOptions.cmake`](cmake/MarbleCompileOptions.cmake): MSVC uses `/W4` and `/permissive-`; other toolchains use `-Wall -Wextra -Wpedantic`. **Debug** defines `MARBLE_DEBUG=1` for conditional compilation. Third-party deps (for example GLFW) are not forced to match.
 
 ## Run
 
-- **Debug:** `build\vs-debug\game\Debug\marbles.exe`
-- **Release:** `build\vs-release\game\Release\marbles.exe`
+- **Windows Debug:** `build\vs-debug\game\Debug\marbles.exe`
+- **Windows Release:** `build\vs-release\game\Release\marbles.exe`
+- **macOS / Linux (Ninja):** `./build/game/marbles` from the repo root (CMake stages `assets/` and `shaders/` next to this binary)
 
-Run **`marbles.exe`** from those folders (there is no separate `garden.exe`). The window title should start as **Marble - launcher**, then switch to **Marble - main menu** once the landing UI is up. If you never see the menu: you may be on an old binary (rebuild the **marbles** target), running **`--headless`** (that path goes straight into Marbles gameplay), or launching a different exe (for example a test) from Visual Studio.
+On Windows run **`marbles.exe`** from those folders; on Unix run **`marbles`**. There is no separate `garden.exe`. The window title should start as **Marble - launcher**, then switch to **Marble - main menu** once the landing UI is up. If you never see the menu: you may be on an old binary (rebuild the **marbles** target), running **`--headless`** (that path goes straight into Marbles gameplay), or launching a different exe (for example a test) from Visual Studio.
 
 Optional: run without a window for a short time (good for quick checks):
 
 ```powershell
 build\vs-debug\game\Debug\marbles.exe --headless --frames 120
+```
+
+```bash
+./build/game/marbles --headless --frames 120
 ```
 
 Adjust diagnostics print cadence (seconds), or disable diagnostics entirely (`<= 0`):
@@ -47,10 +78,18 @@ Adjust diagnostics print cadence (seconds), or disable diagnostics entirely (`<=
 build\vs-debug\game\Debug\marbles.exe --headless --frames 120 --diag-interval 0.5
 ```
 
+```bash
+./build/game/marbles --headless --frames 120 --diag-interval 0.5
+```
+
 On a machine with multiple Vulkan adapters, you can select the **n**th suitable device after the usual sorting (discrete GPUs are preferred before integrated):
 
 ```powershell
 build\vs-debug\game\Debug\marbles.exe --gpu 0
+```
+
+```bash
+./build/game/marbles --gpu 0
 ```
 
 With a resolved assets root (default when `assets/` is staged next to the executable), the demo loads mesh SPIR-V through the binary resource registry from **`assets/shaders/`**; otherwise it falls back to **`shaders/`** beside the executable.
@@ -77,7 +116,10 @@ CTest registers many policy and subsystem executables under [`tests/CMakeLists.t
 
 A longer sample inventory and ADR mapping live in [`docs/runbooks/testing.md`](docs/runbooks/testing.md) and [`docs/runbooks/adr-test-traceability.md`](docs/runbooks/adr-test-traceability.md) (local `docs/` tree).
 
-You can also configure with a plain out-of-tree build (e.g. `cmake -B build -S .`) and run `ctest -C Debug` from `build/` if you are not using presets.
+If you are not using CMake presets:
+
+- **Multi-config generator** (e.g. Visual Studio): `cmake -B build -S .`, then `cmake --build build --config Debug` and `ctest -C Debug --output-on-failure` from `build/`.
+- **Single-config generator** (e.g. Ninja): pass `-DCMAKE_BUILD_TYPE=Debug` at configure time (see [macOS / Linux (Ninja, single-config)](#macos--linux-ninja-single-config)), then `cmake --build build` and `ctest --test-dir build --output-on-failure`.
 
 ## Live rebuild loop
 
