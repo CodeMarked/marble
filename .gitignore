@@ -17,6 +17,9 @@ cmake-build-*/
 *.sdf
 *.opensdf
 
+# --- macOS ---
+.DS_Store
+
 # --- Other IDEs ---
 .idea/
 
