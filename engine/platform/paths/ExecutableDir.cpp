@@ -103,7 +103,7 @@ std::filesystem::path executableDirectory() {
     }
     return canon.parent_path();
 #else
-    // Other POSIX: no portable default yet (see MASTER_PLAN P1 follow-ups).
+    // Other POSIX: no portable default yet (see docs/ENGINE_ROADMAP.md §4 *Platform validation*).
     return {};
 #endif
 }

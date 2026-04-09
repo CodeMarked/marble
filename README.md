@@ -2,7 +2,7 @@
 
 C++20 game project with a **Vulkan** rendering path and a small **runtime engine** (windowing, frame phases, logging, asset-root resolution). Much of what lives under `engine/` is **architecture and policy**—headers and tests that describe future systems (physics, audio, animation, networking, and similar)—and is **not** all wired into the shipped `marbles` demo yet.
 
-Long-term direction and **external C++ integrator** roadmap live under **`docs/`** when that tree is present (the default public clone often omits it per `.gitignore`); maintainers with a full checkout should read [`docs/MASTER_PLAN.md`](docs/MASTER_PLAN.md) and [`docs/architecture/sdk-and-samples-roadmap.md`](docs/architecture/sdk-and-samples-roadmap.md).
+Long-term direction and **external C++ integrator** roadmap live under **`docs/`** when that tree is present (the default public clone often omits it per `.gitignore`); maintainers with a full checkout should read [`docs/ENGINE_ROADMAP.md`](docs/ENGINE_ROADMAP.md) and [`docs/architecture/sdk-and-samples-roadmap.md`](docs/architecture/sdk-and-samples-roadmap.md).
 
 ## Build (recommended: CMake presets)
 
