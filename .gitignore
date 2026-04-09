@@ -31,7 +31,7 @@ compile_commands.json
 *.log
 
 # Optional documentation / notes alongside the tree
-docs/
+# docs/
 
 # Local sibling/overlay folders (packaging experiments, alternate checkouts)
 marble/
