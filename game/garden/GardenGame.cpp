@@ -21,6 +21,7 @@
 #include "physics/RigidBodyDynamics.hpp"
 #include "platform/window/Window.hpp"
 #include "render/IRenderBackend.hpp"
+#include "render/MaterialId.hpp"
 #include "render/RenderTypes.hpp"
 #include "render/vulkan/VulkanRhi.hpp"
 
@@ -109,6 +110,7 @@ using marble::platform::Key;
 using marble::platform::MouseButton;
 using marble::render::FrameOverlayTint;
 using marble::render::IRenderBackend;
+using marble::render::kMaterialTranslucent;
 using marble::render::MeshDrawInstance;
 using marble::render::VulkanRhi;
 
@@ -1891,6 +1893,11 @@ struct GardenGame::State final {
             d.meshIndex = meshSphere;
             d.model = Mat4::translation(marbles[mi].position) * Mat4::scaling({kMarbleRadius, kMarbleRadius, kMarbleRadius});
             d.color = mi == 0 ? Vec3{0.52f, 0.78f, 0.95f} : Vec3{0.82f, 0.88f, 0.92f};
+            if (mi == 0) {
+                d.materialId = kMaterialTranslucent;
+                d.drawLayer = 1;
+                d.colorAlpha = 0.55f;
+            }
             drawScratch.push_back(d);
         }
 

@@ -10,6 +10,7 @@
 #include "physics/PhysicsIntegration.hpp"
 #include "platform/window/Window.hpp"
 #include "render/IRenderBackend.hpp"
+#include "render/MaterialId.hpp"
 #include "render/RenderTypes.hpp"
 #include "render/vulkan/VulkanRhi.hpp"
 #include "shared/PauseMenuInput.hpp"
@@ -49,6 +50,7 @@ using marble::physics::IPhysicsWorld;
 using marble::physics::SimplePhysicsWorld;
 using marble::render::FrameOverlayTint;
 using marble::render::IRenderBackend;
+using marble::render::kMaterialTranslucent;
 using marble::render::MeshDrawInstance;
 using marble::render::VulkanRhi;
 
@@ -651,6 +653,9 @@ struct MarblesGame::State final {
             d.meshIndex = meshSphere;
             d.model = board * Mat4::translation(marble.position) * Mat4::scaling({0.25f, 0.25f, 0.25f});
             d.color = {0.85f, 0.2f, 0.15f};
+            d.colorAlpha = 0.55f;
+            d.materialId = kMaterialTranslucent;
+            d.drawLayer = 1;
             drawScratch.push_back(d);
         }
 

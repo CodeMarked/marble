@@ -380,6 +380,20 @@ add_test(
     COMMAND irender_backend_test
 )
 
+add_executable(mesh_draw_recorder_test
+    mesh_draw_recorder_test.cpp
+)
+
+target_link_libraries(mesh_draw_recorder_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME mesh_draw_recorder_test
+    COMMAND mesh_draw_recorder_test
+)
+
 add_executable(simulation_island_test
     simulation_island_test.cpp
 )
