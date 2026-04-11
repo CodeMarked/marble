@@ -25,6 +25,10 @@ inline constexpr float kPlayerBallMassKg = 0.43f;
 inline constexpr float kGardenJumpChargeMaxSec = 0.42f;
 inline constexpr float kGardenJumpImpulseMin = 1.55f;
 inline constexpr float kGardenJumpImpulseMax = 4.85f;
+/// Horizontal roll input strength (impulse scale per second) for garden marbles — local, dedicated server, and client prediction.
+inline constexpr float kGardenMarbleRollStrength = 4.6f;
+/// Clamp for horizontal speed (m/s) after roll impulses.
+inline constexpr float kGardenMarbleMaxHorizSpeed = 5.2f;
 /// Heightfield samples per side (128² vertices). Must align with Jolt heightfield block packing (power-of-two friendly).
 inline constexpr std::uint32_t kGardenTerrainSampleCount = 128u;
 /// Default `garden_server --seed` / remote-client layout seed; keep in sync with [`RemoteClientParams::layoutSeed`](GardenGame.hpp).

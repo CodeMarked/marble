@@ -1,9 +1,9 @@
 // Headless dedicated server for the garden sample.
 // Runs Jolt physics authoritatively and emits entity snapshots to UDP clients.
 
+#include "garden/GardenAuthorityTick.hpp"
 #include "garden/GardenSimulation.hpp"
 #include "gameplay/AuthoritativeSession.hpp"
-#include "gameplay/MultiplayerWireFormat.hpp"
 #include "gameplay/OnlineMultiplayerFoundation.hpp"
 #include "gameplay/SimulationIsland.hpp"
 #include "gameplay/UdpGameTransport.hpp"
@@ -28,8 +28,11 @@
 namespace {
 
 using namespace marble::gameplay;
-using namespace marble::physics;
-using marble::math::Vec3;
+using marble::physics::PhysicsBodyId;
+using marble::physics::PhysicsDynamicSphereDesc;
+using marble::physics::PhysicsWorldSettings;
+using marble::physics::RigidBodyKinematics;
+using marble::physics::createJoltPhysicsScene;
 
 std::atomic<bool> gGardenServerQuit{false};
 
@@ -45,8 +48,10 @@ inline constexpr std::uint16_t kDefaultMaxPlayers = 4u;
 [[nodiscard]] int usage() {
     std::fprintf(stderr,
         "garden_server — Marble headless dedicated garden server\n"
-        "  garden_server [--port N] [--seed S] [--max-players N]\n"
-        "  Defaults: port %u, seed %u, max-players %u\n",
+        "  garden_server [--port N] [--seed S] [--max-players N] [--snapshot-hz N] [--aoi-radius R] [--no-aoi]\n"
+        "                [--aoi-lookahead SEC] [--aoi-viewer-lookahead SEC] [--snapshot-max-bytes N]\n"
+        "                [--join-token V]  (decimal or 0x hex; or env GARDEN_SERVER_JOIN_TOKEN)\n"
+        "  Defaults: port %u, seed %u, max-players %u, snapshot-hz 20 (must divide sim 60 Hz; AOI on; snapshot bytes 1400)\n",
         static_cast<unsigned>(kDefaultPort),
         static_cast<unsigned>(kDefaultSeed),
         static_cast<unsigned>(kDefaultMaxPlayers)
@@ -67,6 +72,32 @@ inline constexpr std::uint16_t kDefaultMaxPlayers = 4u;
     return true;
 }
 
+[[nodiscard]] bool parseF32(char const* s, float& out) {
+    if (s == nullptr || s[0] == '\0') {
+        return false;
+    }
+    char* end{};
+    float const v = std::strtof(s, &end);
+    if (end == s || *end != '\0' || !(v > 0.f) || v > 1.0e7f) {
+        return false;
+    }
+    out = v;
+    return true;
+}
+
+[[nodiscard]] bool parseF32NonNegative(char const* s, float& out) {
+    if (s == nullptr || s[0] == '\0') {
+        return false;
+    }
+    char* end{};
+    float const v = std::strtof(s, &end);
+    if (end == s || *end != '\0' || !std::isfinite(v) || v < 0.f || v > 1.0e3f) {
+        return false;
+    }
+    out = v;
+    return true;
+}
+
 [[nodiscard]] bool parseU32(char const* s, std::uint32_t& out) {
     if (s == nullptr || s[0] == '\0') {
         return false;
@@ -80,45 +111,17 @@ inline constexpr std::uint16_t kDefaultMaxPlayers = 4u;
     return true;
 }
 
-[[nodiscard]] std::size_t gardenServerClientMarbleCount(std::uint16_t maxPlayersRoster) noexcept {
-    if (maxPlayersRoster < 2u) {
-        return 1u;
+[[nodiscard]] bool parseU32Flexible(char const* s, std::uint32_t& out) {
+    if (s == nullptr || s[0] == '\0') {
+        return false;
     }
-    std::size_t const n = static_cast<std::size_t>(maxPlayersRoster);
-    return std::min(n, static_cast<std::size_t>(8u));
-}
-
-void fillGardenServerMarbleSpawnStates(
-    std::span<marble::physics::RigidBodyKinematics> marbles,
-    marble::garden::GardenLayout const& layout
-) noexcept {
-    if (marbles.empty()) {
-        return;
+    char* end{};
+    unsigned long const v = std::strtoul(s, &end, 0);
+    if (end == s || *end != '\0' || v > 4294967295ul) {
+        return false;
     }
-    std::size_t const count = marbles.size();
-    if (count <= 2u) {
-        std::array<marble::physics::RigidBodyKinematics, 2> pair{};
-        marble::garden::placeMarblesInArena(pair, layout);
-        for (std::size_t i = 0u; i < count; ++i) {
-            marbles[i] = pair[i];
-        }
-        return;
-    }
-    std::array<marble::physics::RigidBodyKinematics, 2> pair{};
-    marble::garden::placeMarblesInArena(pair, layout);
-    marbles[0] = pair[0];
-    marbles[1] = pair[1];
-    float const invMass = 1.f / marble::garden::kPlayerBallMassKg;
-    std::size_t const ringCount = count - 2u;
-    for (std::size_t i = 2u; i < count; ++i) {
-        float const t = 6.2831853f * static_cast<float>(i - 2u) / static_cast<float>(ringCount);
-        float const r = marble::garden::kArenaRadius * 0.55f;
-        float const x = std::cos(t) * r;
-        float const z = std::sin(t) * r;
-        float const y = marble::garden::gardenTerrainHeightAt(layout.terrain, x, z) +
-            marble::garden::kMarbleRadius + 0.12f;
-        marbles[i] = marble::physics::RigidBodyKinematics{{x, y, z}, {}, invMass};
-    }
+    out = static_cast<std::uint32_t>(v);
+    return true;
 }
 
 } // namespace
@@ -127,6 +130,14 @@ int main(int argc, char** argv) {
     std::uint16_t port = kDefaultPort;
     std::uint32_t seed = kDefaultSeed;
     std::uint16_t maxPlayers = kDefaultMaxPlayers;
+    float aoiRadius = 2500.f;
+    bool useAoi = true;
+    float aoiEntityLookaheadSec = 0.5f;
+    float aoiViewerLookaheadSec = 0.f;
+    std::uint32_t snapshotMaxBytes = 1400u;
+    std::uint16_t snapshotHz = 20u;
+    std::uint32_t joinTokenU32 = 0u;
+    bool joinTokenFromArgv = false;
 
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--port") == 0 && (i + 1) < argc) {
@@ -149,11 +160,77 @@ int main(int argc, char** argv) {
             }
             continue;
         }
+        if (std::strcmp(argv[i], "--aoi-radius") == 0 && (i + 1) < argc) {
+            if (!parseF32(argv[++i], aoiRadius)) {
+                return usage();
+            }
+            continue;
+        }
+        if (std::strcmp(argv[i], "--no-aoi") == 0) {
+            useAoi = false;
+            continue;
+        }
+        if (std::strcmp(argv[i], "--aoi-lookahead") == 0 && (i + 1) < argc) {
+            if (!parseF32NonNegative(argv[++i], aoiEntityLookaheadSec)) {
+                return usage();
+            }
+            continue;
+        }
+        if (std::strcmp(argv[i], "--aoi-viewer-lookahead") == 0 && (i + 1) < argc) {
+            if (!parseF32NonNegative(argv[++i], aoiViewerLookaheadSec)) {
+                return usage();
+            }
+            continue;
+        }
+        if (std::strcmp(argv[i], "--snapshot-max-bytes") == 0 && (i + 1) < argc) {
+            if (!parseU32(argv[++i], snapshotMaxBytes)) {
+                return usage();
+            }
+            continue;
+        }
+        if (std::strcmp(argv[i], "--snapshot-hz") == 0 && (i + 1) < argc) {
+            if (!parseU16(argv[++i], snapshotHz) || snapshotHz < 1u || snapshotHz > 60u) {
+                return usage();
+            }
+            continue;
+        }
+        if (std::strcmp(argv[i], "--join-token") == 0 && (i + 1) < argc) {
+            if (!parseU32Flexible(argv[++i], joinTokenU32)) {
+                return usage();
+            }
+            joinTokenFromArgv = true;
+            continue;
+        }
         if (std::strcmp(argv[i], "--help") == 0 || std::strcmp(argv[i], "-h") == 0) {
             return usage();
         }
         std::fprintf(stderr, "garden_server: unknown argument '%s'\n", argv[i]);
         return usage();
+    }
+
+    if (!joinTokenFromArgv) {
+        if (char const* envTok = std::getenv("GARDEN_SERVER_JOIN_TOKEN")) {
+            static_cast<void>(parseU32Flexible(envTok, joinTokenU32));
+        }
+    }
+
+    {
+        SessionConfig probe{};
+        probe.mode = MultiplayerMode::DedicatedServer;
+        probe.maxPlayers = maxPlayers;
+        probe.simulationHz = 60u;
+        probe.snapshotHz = snapshotHz;
+        probe.maxPredictionTicks = 2u;
+        probe.joinTokenU32 = joinTokenU32;
+        probe.maxSnapshotBytesPerPeer = snapshotMaxBytes;
+        if (!isValid(probe)) {
+            std::fprintf(
+                stderr,
+                "garden_server: invalid --snapshot-hz %u (must be 1..60 and divide simulation rate 60 evenly; "
+                "e.g. 10, 12, 15, 20, 30)\n",
+                static_cast<unsigned>(snapshotHz));
+            return 2;
+        }
     }
 
     std::fprintf(stderr, "garden_server: building layout (seed=%u)...\n", seed);
@@ -163,29 +240,14 @@ int main(int argc, char** argv) {
     auto physicsScene = createJoltPhysicsScene();
 
     SimulationIsland island{};
-    PhysicsStaticHeightFieldDesc hfDesc{};
-    hfDesc.offset = localGameplayToJolt(island, layout.terrain.origin);
-    hfDesc.scale = {layout.terrain.cellSize, 1.f, layout.terrain.cellSize};
-    hfDesc.sampleCount = layout.terrain.sampleCount;
-    hfDesc.heights = std::span<float const>(layout.terrain.heights.data(), layout.terrain.heights.size());
-    hfDesc.material.restitution = 0.35f;
-    hfDesc.material.friction = 0.7f;
-    static_cast<void>(physicsScene->addStaticHeightField(hfDesc));
+    marble::garden::gardenAuthorityPopulateStaticCollidersFromLayout(*physicsScene, layout, island);
 
-    for (std::size_t i = 0u; i < layout.staticColliders.size(); ++i) {
-        PhysicsStaticBoxDesc boxDesc{};
-        boxDesc.bounds = localGameplayAabbToJolt(island, layout.staticColliders[i]);
-        boxDesc.material.restitution = 0.25f;
-        boxDesc.material.friction = 0.6f;
-        static_cast<void>(physicsScene->addStaticBox(boxDesc));
-    }
-
-    constexpr std::size_t kMaxMarbles = 8;
+    std::size_t constexpr kMaxMarbles = marble::garden::kMaxGardenAuthorityMarbles;
     std::array<RigidBodyKinematics, kMaxMarbles> marbles{};
     std::array<PhysicsBodyId, kMaxMarbles> marbleBodyIds{};
 
-    std::size_t const marbleCount = gardenServerClientMarbleCount(maxPlayers);
-    fillGardenServerMarbleSpawnStates(std::span<RigidBodyKinematics>(marbles.data(), marbleCount), layout);
+    std::size_t const marbleCount = marble::garden::gardenServerClientMarbleCount(maxPlayers);
+    marble::garden::fillGardenServerMarbleSpawnStates(std::span<RigidBodyKinematics>(marbles.data(), marbleCount), layout);
 
     for (std::size_t i = 0u; i < marbleCount; ++i) {
         PhysicsDynamicSphereDesc desc{};
@@ -193,14 +255,15 @@ int main(int argc, char** argv) {
         desc.linearVelocity = marbles[i].linearVelocity;
         desc.radius = marble::garden::kMarbleRadius;
         desc.invMass = 1.f / marble::garden::kPlayerBallMassKg;
-        desc.material.restitution = 0.45f;
-        desc.material.friction = 0.5f;
-        desc.material.linearDamping = 0.04f;
+        desc.material.restitution = 0.672f;
+        desc.material.friction = 0.42f;
+        desc.material.linearDamping = 0.02f;
+        desc.material.angularDamping = 0.10f;
         marbleBodyIds[i] = physicsScene->addDynamicSphere(desc);
     }
 
     physicsScene->optimizeBroadPhase();
-    std::fprintf(stderr, "garden_server: physics scene ready (%zu marbles, %zu static colliders)\n",
+    std::fprintf(stderr, "garden_server: physics scene ready (%zu player marbles, %zu static colliders)\n",
         marbleCount, layout.staticColliders.size());
 
     UdpGameTransport transport{};
@@ -222,25 +285,47 @@ int main(int argc, char** argv) {
     config.mode = MultiplayerMode::DedicatedServer;
     config.maxPlayers = maxPlayers;
     config.simulationHz = 60u;
-    config.snapshotHz = 20u;
+    config.snapshotHz = snapshotHz;
+    config.joinTokenU32 = joinTokenU32;
+    config.maxSnapshotBytesPerPeer = snapshotMaxBytes;
     std::fprintf(stderr,
         "garden_server: replication sim_hz=%u snapshot_hz=%u max_players=%u (Ctrl+C to stop)\n",
         static_cast<unsigned>(config.simulationHz),
         static_cast<unsigned>(config.snapshotHz),
         static_cast<unsigned>(maxPlayers));
+    if (joinTokenU32 != 0u) {
+        std::fprintf(stderr, "garden_server: join token required (non-zero)\n");
+    }
 
     if (!session.initialize(config, &transport)) {
         std::fprintf(stderr, "garden_server: session init failed\n");
         return 1;
     }
 
+    if (useAoi) {
+        session.setAoiEnabled(true);
+        session.setDefaultAoiRadius(aoiRadius);
+        session.setAoiEntityVelocityLookaheadSeconds(aoiEntityLookaheadSec);
+        session.setAoiViewerPositionLookaheadSeconds(aoiViewerLookaheadSec);
+        std::fprintf(stderr,
+            "garden_server: AOI enabled (radius=%.1f entity_lookahead_s=%.3f viewer_lookahead_s=%.3f)\n",
+            static_cast<double>(aoiRadius),
+            static_cast<double>(aoiEntityLookaheadSec),
+            static_cast<double>(aoiViewerLookaheadSec));
+    } else {
+        session.setAoiEnabled(false);
+        std::fprintf(stderr, "garden_server: AOI disabled (full snapshots per peer)\n");
+    }
+    std::fprintf(stderr,
+        "garden_server: max_snapshot_bytes_per_peer=%u (0=unlimited)\n",
+        static_cast<unsigned>(snapshotMaxBytes));
+
     auto const bootTime = std::chrono::steady_clock::now();
     std::fprintf(stderr, "garden_server: waiting for first client (session ready, send Hello)...\n");
 
     PhysicsWorldSettings worldSettings{};
     worldSettings.gravity = {0.f, -9.81f, 0.f};
-    // Small dynamic count; sleeping spheres that settle in tight contacts can ignore host-applied impulses until
-    // re-activated — keep marbles awake for responsive authoritative control.
+    // Small dynamic count; sleeping bodies can ignore host-applied impulses until re-activated — keep pods awake.
     worldSettings.enableSleeping = false;
     worldSettings.enableContinuousCollision = true;
     worldSettings.maxSubSteps = 1u;
@@ -252,8 +337,6 @@ int main(int argc, char** argv) {
     std::array<float, kMaxMarbles> serverPeerJumpHoldSec{};
     std::array<bool, kMaxMarbles> serverPeerJumpWasHeld{};
     bool loggedFirstClient = false;
-    constexpr PeerId kClientPeerScanEnd =
-        static_cast<PeerId>(2u + marble::gameplay::UdpGameTransport::kMaxPeers);
 
     while (!gGardenServerQuit.load(std::memory_order_relaxed)) {
         auto const now = std::chrono::steady_clock::now();
@@ -264,8 +347,19 @@ int main(int argc, char** argv) {
         while (accumulator >= kFixedDt) {
             accumulator -= kFixedDt;
 
-            // 1. Process transport (receives client input) + emit snapshots of previous state.
-            session.tick(kFixedDt);
+            marble::garden::gardenAuthorityFixedStep(
+                marble::garden::GardenAuthorityRunMode::Dedicated,
+                session,
+                kFixedDt,
+                useAoi,
+                *physicsScene,
+                layout,
+                std::span<RigidBodyKinematics>(marbles.data(), marbleCount),
+                std::span<PhysicsBodyId const>(marbleBodyIds.data(), marbleCount),
+                marbleCount,
+                std::span<float>(serverPeerJumpHoldSec.data(), marbleCount),
+                std::span<bool>(serverPeerJumpWasHeld.data(), marbleCount),
+                worldSettings);
 
             if (session.peerCount() == 0u) {
                 if (gGardenServerQuit.load(std::memory_order_relaxed)) {
@@ -283,89 +377,6 @@ int main(int argc, char** argv) {
                 loggedFirstClient = true;
                 std::fprintf(stderr, "garden_server: first client connected (%zu peer(s))\n",
                     session.peerCount());
-            }
-
-            // 2. Apply client input impulses before physics step (peer N uses marble slot N-2).
-            for (PeerId peer = 2u; peer < kClientPeerScanEnd; ++peer) {
-                auto const* inp = session.latestInput(peer);
-                if (inp == nullptr) {
-                    continue;
-                }
-                if (!session.isConnected(peer)) {
-                    session.clearInput(peer);
-                    continue;
-                }
-                std::size_t const slot = static_cast<std::size_t>(peer) - 2u;
-                if (slot >= marbleCount) {
-                    session.clearInput(peer);
-                    continue;
-                }
-
-                bool const jumpHeld = (inp->buttons & kClientInputButton_Jump) != 0;
-                constexpr float kMarbleRoll = 4.6f;
-                constexpr float kMaxHoriz = 5.2f;
-
-                float const mx = inp->moveX;
-                float const mz = inp->moveZ;
-                float const mag = std::sqrt(mx * mx + mz * mz);
-                if (mag > 1e-5f && marbles[slot].invMass > 0.f) {
-                    float const nx = mx / mag;
-                    float const nz = mz / mag;
-                    Vec3 const wish{nx, 0.f, nz};
-                    applyImpulseLinear(marbles[slot], wish * (kMarbleRoll * kFixedDt));
-
-                    float const vx = marbles[slot].linearVelocity.x;
-                    float const vz = marbles[slot].linearVelocity.z;
-                    float const vh = std::sqrt(vx * vx + vz * vz);
-                    if (vh > kMaxHoriz && vh > 1e-6f) {
-                        float const s = kMaxHoriz / vh;
-                        marbles[slot].linearVelocity.x *= s;
-                        marbles[slot].linearVelocity.z *= s;
-                    }
-                }
-
-                if (jumpHeld) {
-                    serverPeerJumpHoldSec[slot] += kFixedDt;
-                    serverPeerJumpHoldSec[slot] = std::min(
-                        serverPeerJumpHoldSec[slot], marble::garden::kGardenJumpChargeMaxSec);
-                } else {
-                    if (serverPeerJumpWasHeld[slot] && marbles[slot].invMass > 0.f &&
-                        serverPeerJumpHoldSec[slot] > 1e-4f &&
-                        marble::garden::gardenBallOnGround(
-                            layout, marbles[slot], marble::garden::kMarbleRadius)) {
-                        float const imp = marble::garden::gardenJumpImpulseFromHoldSeconds(
-                            serverPeerJumpHoldSec[slot]);
-                        applyImpulseLinear(marbles[slot], Vec3{0.f, imp, 0.f});
-                    }
-                    serverPeerJumpHoldSec[slot] = 0.f;
-                }
-                serverPeerJumpWasHeld[slot] = jumpHeld;
-
-                session.clearInput(peer);
-            }
-
-            // 3. Physics step: sync host velocities -> Jolt step -> read back.
-            std::span<PhysicsBodyId const> bodySpan(marbleBodyIds.data(), marbleCount);
-            physicsScene->syncHostVelocitiesBeforeStep(bodySpan, marbles.data(), marbleCount);
-
-            PhysicsCylindricalXZClamp clamp{};
-            clamp.maxHorizontalRadiusFromYAxis = marble::garden::kGardenRadius;
-            clamp.minCenterY = -5.f;
-            PhysicsStepOptions stepOpts{};
-            stepOpts.postStepCylindricalClamp = &clamp;
-            stepOpts.clampBodyIds = bodySpan;
-
-            physicsScene->step(kFixedDt, worldSettings, stepOpts);
-            physicsScene->readBackKinematics(bodySpan, marbles.data(), marbleCount);
-
-            // 4. Update session entities with post-physics state.
-            for (std::size_t i = 0u; i < marbleCount; ++i) {
-                static_cast<void>(session.setEntity(
-                    i,
-                    WorldObjectRef{static_cast<std::uint64_t>(0x1000u + i)},
-                    marbles[i].position,
-                    marbles[i].linearVelocity
-                ));
             }
 
             ++totalTicks;

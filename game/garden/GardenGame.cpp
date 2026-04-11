@@ -2,7 +2,12 @@
 
 #include "core/ResourceManager.hpp"
 #include "core/Simulation.hpp"
+#include "garden/GardenAuthorityTick.hpp"
+#include "garden/GardenMarblePlayer.hpp"
+#include "garden/GardenRemoteReconcile.hpp"
 #include "garden/GardenSimulation.hpp"
+#include "shared/LoadMeshSampleSpirv.hpp"
+#include "shared/SampleMeshShaderResources.hpp"
 #include "shared/PauseMenuInput.hpp"
 #include "physics/IPhysicsScene.hpp"
 #include "physics/MiddlewarePhysicsTypes.hpp"
@@ -11,7 +16,9 @@
 #include "math/Geometry.hpp"
 #include "math/Mat4.hpp"
 #include "math/Vec3.hpp"
+#include "gameplay/AuthoritativeSession.hpp"
 #include "gameplay/ClientSession.hpp"
+#include "gameplay/MultiplayerSessionEnvelope.hpp"
 #include "gameplay/MultiplayerWireFormat.hpp"
 #include "gameplay/OnlineMultiplayerFoundation.hpp"
 #include "gameplay/SimulationIsland.hpp"
@@ -20,6 +27,7 @@
 #include "physics/PhysicsIntegration.hpp"
 #include "physics/RigidBodyDynamics.hpp"
 #include "platform/window/Window.hpp"
+#include "render/DrawFlags.hpp"
 #include "render/IRenderBackend.hpp"
 #include "render/MaterialId.hpp"
 #include "render/RenderTypes.hpp"
@@ -27,8 +35,11 @@
 
 #include <array>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <limits>
 #include <memory>
@@ -52,10 +63,7 @@ using marble::garden::kMarbleRadius;
 using marble::garden::placeMarblesInArena;
 using marble::garden::rayHitsSphere;
 using marble::garden::rayIntersectHorizontalPlane;
-using marble::garden::gardenBallOnGround;
-using marble::garden::gardenJumpImpulseFromHoldSeconds;
 using marble::garden::gardenTerrainHeightAt;
-using marble::garden::kGardenJumpChargeMaxSec;
 using marble::input::AbstractControl;
 using marble::input::AbstractControlArray;
 using marble::input::ActionContextEntry;
@@ -78,13 +86,17 @@ using marble::physics::PhysicsCylindricalXZClamp;
 using marble::physics::PhysicsDynamicSphereDesc;
 using marble::physics::PhysicsStaticBoxDesc;
 using marble::physics::PhysicsStepOptions;
+using marble::physics::PhysicsWorldSettings;
 using marble::physics::RigidBodyKinematics;
 using marble::physics::IPhysicsWorld;
 using marble::physics::SimplePhysicsWorld;
 using marble::physics::createJoltPhysicsScene;
 using marble::physics::applyImpulseLinear;
+using marble::gameplay::AuthoritativeSession;
 using marble::gameplay::AuthorityRoster;
+using marble::gameplay::ClientInputWirePayload;
 using marble::gameplay::ClientSession;
+using marble::gameplay::kClientInputButton_Jump;
 using marble::gameplay::ConnectionState;
 using marble::gameplay::EntityKinematicsSnapshot;
 using marble::gameplay::kInvalidPeerId;
@@ -96,8 +108,6 @@ using marble::gameplay::SimulationIsland;
 using marble::gameplay::SnapshotInterpolator;
 using marble::gameplay::UdpGameTransport;
 using marble::gameplay::isValid;
-using marble::gameplay::ClientInputWirePayload;
-using marble::gameplay::kClientInputButton_Jump;
 using marble::gameplay::kClientInputWirePayloadBytes;
 using marble::gameplay::kEntityKinematicsSnapshotWireBytes;
 using marble::gameplay::localGameplayAabbToJolt;
@@ -105,14 +115,15 @@ using marble::gameplay::localGameplayHeightFieldToJolt;
 using marble::gameplay::localGameplayToJolt;
 using marble::gameplay::readEntityKinematicsSnapshot;
 using marble::gameplay::writeClientInputPayload;
+using marble::gameplay::SessionStateCorrectionPayload;
 using marble::gameplay::writeSessionClientInput;
 using marble::platform::Key;
 using marble::platform::MouseButton;
 using marble::render::FrameOverlayTint;
 using marble::render::IRenderBackend;
-using marble::render::kMaterialTranslucent;
 using marble::render::MeshDrawInstance;
 using marble::render::VulkanRhi;
+using marble::render::kMaterialTranslucent;
 
 /// Esc / Back toggles pause. While paused, Q returns to the app menu (not during live play).
 static constexpr LogicalActionId kActionPauseMenu = 1;
@@ -125,6 +136,80 @@ enum class PausePanel : std::uint8_t {
     Main,
     Options,
 };
+
+/// Must match `garden_server` default `SessionConfig::simulationHz`.
+static constexpr float kGardenRemoteServerSimulationHz = 60.f;
+/// Beyond this error vs last authority sample, snap local display pose to authority (recovery only; no per-frame pull).
+static constexpr float kGardenRemoteReconcileSnapThresholdM = 0.55f;
+static constexpr std::size_t kRemoteAuthMarbleCapacity = 8u;
+
+static constexpr std::uint32_t kGardenRemoteInterpDelayMinTicks = 2u;
+static constexpr std::uint32_t kGardenRemoteInterpDelayMaxTicks = 14u;
+static constexpr std::uint32_t kGardenRemoteMaxExtrapolationTicks = 2u;
+/// SnapshotInterpolator: lerp position but take newer velocity when \|Δv\| exceeds this (m/s).
+static constexpr float kGardenRemoteVelocityJumpBlendMps = 6.f;
+/// SnapshotInterpolator: hold keyframe when extrapolating if velocity jumped vs previous frame by this (m/s).
+static constexpr float kGardenRemoteVelocityJumpExtrapMps = 6.f;
+/// Latest-keyframe clamp for remote marbles when extrapolated and (speed ≥ this OR Δv ≥ kGardenRemoteLatestClampDvMps).
+static constexpr float kGardenRemoteLatestClampMinSpeedMps = 1.5f;
+static constexpr float kGardenRemoteLatestClampDvMps = 5.f;
+
+/// Dev-only: `GARDEN_REMOTE_NO_PREDICT=1` skips local marble prediction (interpolation-only local pose).
+[[nodiscard]] bool gardenRemoteEnvTruthy(char const* name) noexcept {
+    char const* v = std::getenv(name);
+    if (v == nullptr || v[0] == '\0') {
+        return false;
+    }
+    if (v[0] == '1' && v[1] == '\0') {
+        return true;
+    }
+    return std::strcmp(v, "true") == 0 || std::strcmp(v, "TRUE") == 0;
+}
+
+/// Milliseconds between `[Garden desync]` lines when `GARDEN_REMOTE_DESYNC_LOG=1` (default 500).
+[[nodiscard]] int gardenRemoteDesyncLogPeriodMs() noexcept {
+    char const* v = std::getenv("GARDEN_REMOTE_DESYNC_LOG_MS");
+    if (v == nullptr || v[0] == '\0') {
+        return 500;
+    }
+    char* end{};
+    long const x = std::strtol(v, &end, 10);
+    if (end == v || *end != '\0' || x < 50L || x > 60000L) {
+        return 500;
+    }
+    return static_cast<int>(x);
+}
+
+[[nodiscard]] std::uint32_t gardenRemoteEnvU32(
+    char const* name, std::uint32_t defaultV, std::uint32_t minV, std::uint32_t maxV) noexcept {
+    char const* v = std::getenv(name);
+    if (v == nullptr || v[0] == '\0') {
+        return defaultV;
+    }
+    char* end{};
+    unsigned long const x = std::strtoul(v, &end, 10);
+    if (end == v || *end != '\0' || x > 4294967295ul) {
+        return defaultV;
+    }
+    std::uint32_t const u = static_cast<std::uint32_t>(x);
+    if (u < minV || u > maxV) {
+        return defaultV;
+    }
+    return u;
+}
+
+[[nodiscard]] float gardenRemoteEnvF32(char const* name, float defaultV, float minV, float maxV) noexcept {
+    char const* v = std::getenv(name);
+    if (v == nullptr || v[0] == '\0') {
+        return defaultV;
+    }
+    char* end{};
+    float const f = std::strtof(v, &end);
+    if (end == v || *end != '\0' || !std::isfinite(f) || f < minV || f > maxV) {
+        return defaultV;
+    }
+    return f;
+}
 
 [[nodiscard]] Mat4 lookAtLh(Vec3 const& eye, Vec3 const& target, Vec3 const& worldUp) noexcept {
     Vec3 const f = marble::math::normalize(target - eye);
@@ -1065,16 +1150,27 @@ struct GardenGame::State final {
     std::array<std::uint32_t, kPropMeshCount> meshProps{};
 
     GardenLayout layout{};
-    std::array<RigidBodyKinematics, 2> marbles{};
+    static constexpr std::size_t kAuthMarbleCap = marble::garden::kMaxGardenAuthorityMarbles;
+    std::array<RigidBodyKinematics, kAuthMarbleCap> marbles{};
+    std::size_t marbleCount_{2u};
     SimplePhysicsWorld physics{};
     std::unique_ptr<marble::physics::IPhysicsScene> physicsScene_{createJoltPhysicsScene()};
-    std::array<marble::physics::PhysicsBodyId, 2> marbleBodyIds_{};
+    std::array<marble::physics::PhysicsBodyId, kAuthMarbleCap> marbleBodyIds_{};
 
     SimulationIsland island_{};
     SessionConfig sessionConfig_{};
     AuthorityRoster<4> roster_{};
     GardenSessionKind sessionKind_ = GardenSessionKind::Offline;
     RemoteClientParams clientParams_{};
+
+    std::unique_ptr<UdpGameTransport> hostTransport_{};
+    AuthoritativeSession<> hostSession_{};
+    bool hostListenInitialized_{false};
+    std::uint16_t hostListenPort_{27778u};
+    PhysicsWorldSettings hostAuthorityWorld_{};
+    std::array<float, kAuthMarbleCap> hostPeerJumpHoldSec_{};
+    std::array<bool, kAuthMarbleCap> hostPeerJumpWasHeld_{};
+    std::uint32_t hostInputTickCounter_{};
 
     std::unique_ptr<UdpGameTransport> clientTransport_{};
     ClientSession<> clientSession_{};
@@ -1083,6 +1179,16 @@ struct GardenGame::State final {
     /// Latest server `simTick` applied to `snapInterp_` (ring `snapshotCount()` stops growing at 32, so we cannot
     /// use count deltas to detect new snapshots).
     std::optional<std::uint32_t> remoteLastConsumedSnapshotServerTick_{};
+    std::array<Vec3, kRemoteAuthMarbleCapacity> remoteAuthMarblePos_{};
+    std::array<bool, kRemoteAuthMarbleCapacity> remoteAuthMarbleValid_{};
+    std::array<float, kRemoteAuthMarbleCapacity> remoteAuthMarbleYaw_{};
+    std::array<bool, kRemoteAuthMarbleCapacity> remoteAuthMarbleYawValid_{};
+    std::array<float, kRemoteAuthMarbleCapacity> remoteDisplayYaw_{};
+    std::uint32_t lastAckedServerSimTick_{};
+
+    /// `GARDEN_REMOTE_DESYNC_LOG`: periodic stderr metrics for local slot vs last authoritative snapshot.
+    std::optional<std::chrono::steady_clock::time_point> lastDesyncLogTime_{};
+    std::uint64_t desyncPosSnapCount_{};
 
     float camYaw = 0.7f;
     float camDist = 14.f;
@@ -1178,7 +1284,7 @@ struct GardenGame::State final {
         marbleMat.friction = 0.42f;
         marbleMat.linearDamping = 0.02f;
         marbleMat.angularDamping = 0.10f;
-        for (std::size_t i = 0; i < marbles.size(); ++i) {
+        for (std::size_t i = 0; i < marbleCount_; ++i) {
             PhysicsDynamicSphereDesc sd{};
             sd.center = localGameplayToJolt(island_, marbles[i].position);
             sd.linearVelocity = marbles[i].linearVelocity;
@@ -1188,6 +1294,91 @@ struct GardenGame::State final {
             marbleBodyIds_[i] = physicsScene_->addDynamicSphere(sd);
         }
         physicsScene_->optimizeBroadPhase();
+    }
+
+    void rebuildListenHostDynamics() noexcept {
+        using marble::physics::PhysicsBodyId;
+        using marble::physics::PhysicsDynamicSphereDesc;
+        for (std::size_t i = 0u; i < marbleCount_; ++i) {
+            PhysicsDynamicSphereDesc desc{};
+            desc.center = localGameplayToJolt(island_, marbles[i].position);
+            desc.linearVelocity = marbles[i].linearVelocity;
+            desc.radius = kMarbleRadius;
+            desc.invMass = 1.f / marble::garden::kPlayerBallMassKg;
+            desc.material.restitution = 0.672f;
+            desc.material.friction = 0.42f;
+            desc.material.linearDamping = 0.02f;
+            desc.material.angularDamping = 0.10f;
+            marbleBodyIds_[i] = physicsScene_->addDynamicSphere(desc);
+        }
+        physicsScene_->optimizeBroadPhase();
+    }
+
+    void rebuildListenHostPhysicsScene() noexcept {
+        physicsScene_->clear();
+        marble::garden::gardenAuthorityPopulateStaticCollidersFromLayout(*physicsScene_, layout, island_);
+        rebuildListenHostDynamics();
+    }
+
+    void initListenHostNetworking() noexcept {
+        hostTransport_ = std::make_unique<UdpGameTransport>();
+        std::uint16_t port = 27778u;
+        if (char const* envPort = std::getenv("GARDEN_LISTEN_PORT")) {
+            char* end{};
+            unsigned long const v = std::strtoul(envPort, &end, 10);
+            if (end != envPort && *end == '\0' && v > 0ul && v <= 65535ul) {
+                port = static_cast<std::uint16_t>(v);
+            }
+        }
+        if (!hostTransport_->bind(port)) {
+            std::fprintf(stderr, "GardenGame: listen host failed to bind UDP port %u\n", static_cast<unsigned>(port));
+            return;
+        }
+        hostTransport_->setMinimumJoinerPeerId(3u);
+        hostListenPort_ = hostTransport_->localPort();
+        if (!hostSession_.initialize(sessionConfig_, hostTransport_.get())) {
+            std::fprintf(stderr, "GardenGame: listen host AuthoritativeSession init failed\n");
+            hostTransport_.reset();
+            return;
+        }
+        hostSession_.setAoiEnabled(true);
+        hostSession_.setDefaultAoiRadius(2500.f);
+        hostSession_.setAoiEntityVelocityLookaheadSeconds(0.5f);
+        hostSession_.setAoiViewerPositionLookaheadSeconds(0.f);
+        hostListenInitialized_ = true;
+        std::fprintf(
+            stderr,
+            "GardenGame: listen host UDP port %u — remotes use layout seed 0x%X; first joiner peer id 3 (host "
+            "synthetic 2)\n",
+            static_cast<unsigned>(hostListenPort_),
+            static_cast<unsigned>(kLayoutSeed));
+    }
+
+    void fallbackFromListenHostToOffline() noexcept {
+        sessionKind_ = GardenSessionKind::Offline;
+        hostListenInitialized_ = false;
+        hostTransport_.reset();
+        sessionConfig_ = SessionConfig{
+            MultiplayerMode::Offline,
+            1u,
+            60u,
+            20u,
+            2u,
+            0u,
+            1400u,
+        };
+        (void)roster_.bootstrap(MultiplayerMode::Offline);
+        marbleCount_ = 2u;
+        std::array<RigidBodyKinematics, 2> pair{};
+        placeMarblesInArena(pair, layout);
+        marbles[0] = pair[0];
+        marbles[1] = pair[1];
+        physics.setSettings({
+            .gravity = {0.f, -9.81f, 0.f},
+            .enableContinuousCollision = true,
+            .maxSubSteps = 4u,
+        });
+        rebuildPhysicsFromLayout();
     }
 
     explicit State(core::Engine& e, GardenSessionKind session, RemoteClientParams params = {})
@@ -1200,6 +1391,8 @@ struct GardenGame::State final {
                 60u,
                 20u,
                 2u,
+                0u,
+                1400u,
             };
             (void)roster_.bootstrap(MultiplayerMode::ListenServer);
         } else {
@@ -1209,6 +1402,8 @@ struct GardenGame::State final {
                 60u,
                 20u,
                 2u,
+                0u,
+                1400u,
             };
             (void)roster_.bootstrap(MultiplayerMode::Offline);
         }
@@ -1218,11 +1413,34 @@ struct GardenGame::State final {
             sessionKind_ = GardenSessionKind::Offline;
         }
         buildGardenLayout(layoutSeedForCurrentSession(), layout);
-        placeMarblesInArena(marbles, layout);
 
         if (sessionKind_ == GardenSessionKind::RemoteClient) {
+            marbleCount_ = 2u;
+            std::array<RigidBodyKinematics, 2> pair{};
+            placeMarblesInArena(pair, layout);
+            marbles[0] = pair[0];
+            marbles[1] = pair[1];
             initClientNetworking();
+        } else if (sessionKind_ == GardenSessionKind::ListenHost) {
+            marbleCount_ = marble::garden::gardenServerClientMarbleCount(sessionConfig_.maxPlayers);
+            marble::garden::fillGardenServerMarbleSpawnStates(
+                std::span<RigidBodyKinematics>(marbles.data(), marbleCount_), layout);
+            hostAuthorityWorld_.gravity = {0.f, -9.81f, 0.f};
+            hostAuthorityWorld_.enableSleeping = false;
+            hostAuthorityWorld_.enableContinuousCollision = true;
+            hostAuthorityWorld_.maxSubSteps = 1u;
+            rebuildListenHostPhysicsScene();
+            initListenHostNetworking();
+            if (!hostListenInitialized_) {
+                std::fprintf(stderr, "GardenGame: reverting listen host to offline Garden\n");
+                fallbackFromListenHostToOffline();
+            }
         } else {
+            marbleCount_ = 2u;
+            std::array<RigidBodyKinematics, 2> pair{};
+            placeMarblesInArena(pair, layout);
+            marbles[0] = pair[0];
+            marbles[1] = pair[1];
             physics.setSettings({
                 .gravity = {0.f, -9.81f, 0.f},
                 .enableContinuousCollision = true,
@@ -1235,6 +1453,18 @@ struct GardenGame::State final {
 
         inputPolicy_.resetActionGates();
         inputPolicy_.applyActionContext(std::span{kGameplayContext});
+    }
+
+    void applyRemoteSnapshotInterpTunables() noexcept {
+        std::uint32_t const extr = gardenRemoteEnvU32(
+            "GARDEN_REMOTE_MAX_EXTRAP_TICKS", kGardenRemoteMaxExtrapolationTicks, 0u, 20u);
+        snapInterp_.setMaxExtrapolationTicks(extr);
+        float const blend = gardenRemoteEnvF32(
+            "GARDEN_REMOTE_VELOCITY_JUMP_BLEND_MPS", kGardenRemoteVelocityJumpBlendMps, 0.f, 200.f);
+        float const extrJump = gardenRemoteEnvF32(
+            "GARDEN_REMOTE_VELOCITY_JUMP_EXTRAP_MPS", kGardenRemoteVelocityJumpExtrapMps, 0.f, 200.f);
+        snapInterp_.setVelocityJumpBlendThresholdMps(blend);
+        snapInterp_.setVelocityJumpExtrapolationThresholdMps(extrJump);
     }
 
     void initClientNetworking() noexcept {
@@ -1254,7 +1484,8 @@ struct GardenGame::State final {
             rebuildPhysicsFromLayout();
             return;
         }
-        if (!clientSession_.initialize(clientTransport_.get(), kServerPeerId, 60u, 0xCAFEu)) {
+        if (!clientSession_.initialize(
+                clientTransport_.get(), kServerPeerId, 60u, 0xCAFEu, clientParams_.joinTokenU32)) {
             std::fprintf(stderr, "GardenGame: failed to initialize client session\n");
             sessionKind_ = GardenSessionKind::Offline;
             physics.setSettings({.gravity = {0.f, -9.81f, 0.f}, .enableContinuousCollision = true, .maxSubSteps = 4u});
@@ -1262,6 +1493,19 @@ struct GardenGame::State final {
             return;
         }
         snapInterp_.setRenderDelayTicks(4u);
+        applyRemoteSnapshotInterpTunables();
+        if (gardenRemoteEnvTruthy("GARDEN_REMOTE_NO_PREDICT")) {
+            std::fprintf(
+                stderr,
+                "GardenGame: GARDEN_REMOTE_NO_PREDICT=1 — local pod prediction OFF (compare feel vs default).\n");
+        }
+        if (gardenRemoteEnvTruthy("GARDEN_REMOTE_DESYNC_LOG")) {
+            std::fprintf(
+                stderr,
+                "GardenGame: GARDEN_REMOTE_DESYNC_LOG=1 — stderr metrics every %d ms "
+                "(override with GARDEN_REMOTE_DESYNC_LOG_MS).\n",
+                gardenRemoteDesyncLogPeriodMs());
+        }
     }
 
     void primeAssetRegistryOnce() {
@@ -1279,11 +1523,33 @@ struct GardenGame::State final {
 
     void restartGarden() noexcept {
         buildGardenLayout(layoutSeedForCurrentSession(), layout);
-        placeMarblesInArena(marbles, layout);
         if (sessionKind_ == GardenSessionKind::RemoteClient) {
+            marbleCount_ = 2u;
+            std::array<RigidBodyKinematics, 2> pair{};
+            placeMarblesInArena(pair, layout);
+            marbles[0] = pair[0];
+            marbles[1] = pair[1];
             snapInterp_.reset();
+            applyRemoteSnapshotInterpTunables();
             remoteLastConsumedSnapshotServerTick_.reset();
+            remoteAuthMarbleValid_.fill(false);
+            remoteAuthMarbleYawValid_.fill(false);
+            remoteDisplayYaw_.fill(0.f);
+            lastAckedServerSimTick_ = 0u;
+        } else if (sessionKind_ == GardenSessionKind::ListenHost && hostListenInitialized_) {
+            marbleCount_ = marble::garden::gardenServerClientMarbleCount(sessionConfig_.maxPlayers);
+            marble::garden::fillGardenServerMarbleSpawnStates(
+                std::span<RigidBodyKinematics>(marbles.data(), marbleCount_), layout);
+            hostPeerJumpHoldSec_.fill(0.f);
+            hostPeerJumpWasHeld_.fill(false);
+            hostInputTickCounter_ = 0u;
+            rebuildListenHostPhysicsScene();
         } else {
+            marbleCount_ = 2u;
+            std::array<RigidBodyKinematics, 2> pair{};
+            placeMarblesInArena(pair, layout);
+            marbles[0] = pair[0];
+            marbles[1] = pair[1];
             rebuildPhysicsFromLayout();
         }
         camYaw = camYawTarget = 0.7f;
@@ -1300,6 +1566,22 @@ struct GardenGame::State final {
         pausePanel = PausePanel::Main;
     }
 
+    /// Orbit camera / local marble highlight: slot `peerId - 2` when remote and connected (matches server mapping).
+    [[nodiscard]] std::size_t localViewMarbleIndex() const noexcept {
+        if (sessionKind_ != GardenSessionKind::RemoteClient) {
+            return 0u;
+        }
+        if (clientSession_.state() != ConnectionState::Connected) {
+            return 0u;
+        }
+        PeerId const ap = clientSession_.assignedPeerId();
+        if (ap < 2u) {
+            return 0u;
+        }
+        std::size_t const slot = static_cast<std::size_t>(ap) - 2u;
+        return slot < marbleCount_ ? slot : 0u;
+    }
+
     void tickRemoteClient(float dt) noexcept {
         if (!clientTransport_) {
             return;
@@ -1309,11 +1591,38 @@ struct GardenGame::State final {
         if (clientSession_.state() == ConnectionState::Connected && !clientConnected_) {
             clientConnected_ = true;
             snapInterp_.reset();
+            applyRemoteSnapshotInterpTunables();
             remoteLastConsumedSnapshotServerTick_.reset();
+            remoteAuthMarbleValid_.fill(false);
+            remoteAuthMarbleYawValid_.fill(false);
+            remoteDisplayYaw_.fill(0.f);
+            lastAckedServerSimTick_ = 0u;
+            jumpChargeSec_ = 0.f;
+            jumpWasHeld_ = false;
+            lastDesyncLogTime_.reset();
+            desyncPosSnapCount_ = 0u;
         }
         if (clientSession_.state() == ConnectionState::Disconnected) {
             clientConnected_ = false;
             remoteLastConsumedSnapshotServerTick_.reset();
+            remoteAuthMarbleValid_.fill(false);
+            remoteAuthMarbleYawValid_.fill(false);
+            remoteDisplayYaw_.fill(0.f);
+            jumpChargeSec_ = 0.f;
+            jumpWasHeld_ = false;
+        }
+
+        SessionStateCorrectionPayload corr{};
+        while (clientSession_.takePendingStateCorrection(corr)) {
+            if (corr.entity.guid >= 0x1000u) {
+                std::size_t const idx = static_cast<std::size_t>(corr.entity.guid - 0x1000u);
+                if (idx < remoteAuthMarblePos_.size()) {
+                    remoteAuthMarblePos_[idx] = corr.positionLocal;
+                    remoteAuthMarbleValid_[idx] = true;
+                    remoteAuthMarbleYaw_[idx] = corr.yawRadians;
+                    remoteAuthMarbleYawValid_[idx] = true;
+                }
+            }
         }
 
         // Ingest the newest buffered snapshot when its server simTick advances. `ClientSession::snapshotCount()`
@@ -1341,26 +1650,33 @@ struct GardenGame::State final {
                         }
                         if (count > 0u) {
                             snapInterp_.pushSnapshot(snaps[0].simTick, snaps.data(), count);
+                            clientSession_.noteAuthoritativeSnapshot(snaps[0].simTick);
+                            lastAckedServerSimTick_ = snaps[0].simTick;
+                            for (std::size_t ei = 0u; ei < count; ++ei) {
+                                std::uint64_t const g = snaps[ei].entity.guid;
+                                if (g >= 0x1000u) {
+                                    std::size_t const idx = static_cast<std::size_t>(g - 0x1000u);
+                                    if (idx < remoteAuthMarblePos_.size()) {
+                                        remoteAuthMarblePos_[idx] = snaps[ei].positionLocal;
+                                        remoteAuthMarbleValid_[idx] = true;
+                                        remoteAuthMarbleYaw_[idx] = snaps[ei].yawRadians;
+                                        remoteAuthMarbleYawValid_[idx] = true;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
         }
 
-        std::uint32_t const renderTick = snapInterp_.suggestRenderTick();
-        std::array<InterpolatedEntity, 16> interpolated{};
-        std::size_t const interpCount = snapInterp_.interpolate(renderTick, interpolated.data(), interpolated.size());
-
-        for (std::size_t i = 0u; i < interpCount && i < marbles.size(); ++i) {
-            marbles[i].position = interpolated[i].position;
-            marbles[i].linearVelocity = interpolated[i].velocity;
-        }
-
         if (clientSession_.state() == ConnectionState::Connected) {
             ClientInputWirePayload inp{};
             inp.clientTick = inputTickCounter_++;
+            inp.serverTickAck = lastAckedServerSimTick_;
             inp.moveX = pendingMoveX_;
             inp.moveZ = pendingMoveZ_;
+            inp.steer = 0.f;
             inp.buttons = pendingButtons_;
 
             std::array<std::uint8_t, kClientInputWirePayloadBytes> payload{};
@@ -1534,6 +1850,12 @@ struct GardenGame::State final {
             ax += controlScratch_[iLx];
             az -= controlScratch_[iLy];
             float const alen = std::sqrt(ax * ax + az * az);
+
+            bool const spaceDown = w->isKeyDown(Key::Space);
+            std::size_t const iPadA2 = static_cast<std::size_t>(AbstractControl::RPadDown);
+            bool const padJumpDown = controlScratch_[iPadA2] >= 0.5f;
+            bool const jumpHeld = spaceDown || padJumpDown;
+
             if (sessionKind_ == GardenSessionKind::RemoteClient) {
                 if (alen > 1e-5f) {
                     Vec3 const wish = worldRightRoll * (ax / alen) + worldFwdRoll * (az / alen);
@@ -1543,41 +1865,32 @@ struct GardenGame::State final {
                     pendingMoveX_ = 0.f;
                     pendingMoveZ_ = 0.f;
                 }
-            } else if (alen > 1e-5f && marbles[0].invMass > 0.f) {
-                Vec3 wish = worldRightRoll * (ax / alen) + worldFwdRoll * (az / alen);
-                constexpr float kMarbleRoll = 4.6f;
-                applyImpulseLinear(marbles[0], wish * (kMarbleRoll * h));
-                float const vx = marbles[0].linearVelocity.x;
-                float const vz = marbles[0].linearVelocity.z;
-                float const vh = std::sqrt(vx * vx + vz * vz);
-                constexpr float kMaxHoriz = 5.2f;
-                if (vh > kMaxHoriz && vh > 1e-6f) {
-                    float const s = kMaxHoriz / vh;
-                    marbles[0].linearVelocity.x *= s;
-                    marbles[0].linearVelocity.z *= s;
-                }
-            }
-
-            bool const spaceDown = w->isKeyDown(Key::Space);
-            std::size_t const iPadA2 = static_cast<std::size_t>(AbstractControl::RPadDown);
-            bool const padJumpDown = controlScratch_[iPadA2] >= 0.5f;
-            bool const jumpHeld = spaceDown || padJumpDown;
-
-            if (sessionKind_ == GardenSessionKind::RemoteClient) {
                 pendingButtons_ = jumpHeld ? kClientInputButton_Jump : 0u;
-            } else {
-                bool const groundedForJump = gardenBallOnGround(layout, marbles[0], kMarbleRadius);
-                if (jumpHeld) {
-                    jumpChargeSec_ += h;
-                    jumpChargeSec_ = std::min(jumpChargeSec_, kGardenJumpChargeMaxSec);
+            } else if (sessionKind_ == GardenSessionKind::ListenHost && hostListenInitialized_ && marbleCount_ > 0u) {
+                ClientInputWirePayload inp{};
+                inp.clientTick = hostInputTickCounter_++;
+                inp.serverTickAck = hostSession_.currentTick();
+                inp.steer = 0.f;
+                if (alen > 1e-5f) {
+                    Vec3 const wish = worldRightRoll * (ax / alen) + worldFwdRoll * (az / alen);
+                    inp.moveX = wish.x;
+                    inp.moveZ = wish.z;
                 } else {
-                    if (jumpWasHeld_ && marbles[0].invMass > 0.f && jumpChargeSec_ > 1e-4f && groundedForJump) {
-                        float const imp = gardenJumpImpulseFromHoldSeconds(jumpChargeSec_);
-                        applyImpulseLinear(marbles[0], Vec3{0.f, imp, 0.f});
-                    }
-                    jumpChargeSec_ = 0.f;
+                    inp.moveX = 0.f;
+                    inp.moveZ = 0.f;
                 }
-                jumpWasHeld_ = jumpHeld;
+                inp.buttons = jumpHeld ? kClientInputButton_Jump : 0u;
+                hostSession_.submitSyntheticClientInput(2u, inp);
+            } else if (marbles[0].invMass > 0.f) {
+                float wx = 0.f;
+                float wz = 0.f;
+                if (alen > 1e-5f) {
+                    Vec3 const wish = worldRightRoll * (ax / alen) + worldFwdRoll * (az / alen);
+                    wx = wish.x;
+                    wz = wish.z;
+                }
+                marble::garden::applyGardenMarblePlayerStep(
+                    marbles[0], layout, wx, wz, jumpHeld, jumpWasHeld_, jumpChargeSec_, h, kMarbleRadius);
             }
 
             int fbW = 1, fbH = 1;
@@ -1586,7 +1899,8 @@ struct GardenGame::State final {
                 static_cast<float>(fbW) / static_cast<float>(std::max(1, fbH));
             constexpr float fovy = 60.f * 3.14159265f / 180.f;
 
-            Vec3 const player = marbles[0].position;
+            std::size_t const viewMarble = localViewMarbleIndex();
+            Vec3 const player = marbles[viewMarble].position;
             float const sx = std::sin(camYaw);
             float const cz = std::cos(camYaw);
             Vec3 const eye = player + Vec3{sx * camDist, camHeight, cz * camDist};
@@ -1594,7 +1908,7 @@ struct GardenGame::State final {
 
             bool const padDown = controlScratch_[iRb] >= 0.5f;
 
-            if (sessionKind_ != GardenSessionKind::RemoteClient) {
+            if (sessionKind_ != GardenSessionKind::RemoteClient && sessionKind_ != GardenSessionKind::ListenHost) {
 
             if (mouseFlickArmed && rightDown && !rightMouseWasDown) {
                 mouseFlickArmed = false;
@@ -1756,16 +2070,36 @@ struct GardenGame::State final {
 
         if (!paused && sessionKind_ == GardenSessionKind::RemoteClient) {
             tickRemoteClient(h);
-        } else if (!paused && sessionKind_ != GardenSessionKind::RemoteClient) {
+        } else if (!paused && sessionKind_ == GardenSessionKind::ListenHost && hostListenInitialized_) {
+            marble::garden::gardenAuthorityFixedStep(
+                marble::garden::GardenAuthorityRunMode::ListenHost,
+                hostSession_,
+                h,
+                true,
+                *physicsScene_,
+                layout,
+                std::span<RigidBodyKinematics>(marbles.data(), marbleCount_),
+                std::span<marble::physics::PhysicsBodyId const>(marbleBodyIds_.data(), marbleCount_),
+                marbleCount_,
+                std::span<float>(hostPeerJumpHoldSec_.data(), marbleCount_),
+                std::span<bool>(hostPeerJumpWasHeld_.data(), marbleCount_),
+                hostAuthorityWorld_);
+        } else if (!paused && sessionKind_ == GardenSessionKind::Offline) {
             float const minCenterY = layout.terrain.minHeight - kMarbleRadius - 0.55f;
             PhysicsCylindricalXZClamp const clamp{
                 kGardenRadius - kMarbleRadius - 0.02f,
                 minCenterY,
             };
-            PhysicsStepOptions const stepOpts{&clamp, std::span(marbleBodyIds_)};
-            physicsScene_->syncHostVelocitiesBeforeStep(marbleBodyIds_, marbles.data(), marbles.size());
+            PhysicsStepOptions const stepOpts{&clamp, std::span(marbleBodyIds_.data(), marbleCount_)};
+            physicsScene_->syncHostVelocitiesBeforeStep(
+                std::span<marble::physics::PhysicsBodyId const>(marbleBodyIds_.data(), marbleCount_),
+                marbles.data(),
+                marbleCount_);
             physicsScene_->step(h, physics.settings(), stepOpts);
-            physicsScene_->readBackKinematics(marbleBodyIds_, marbles.data(), marbles.size());
+            physicsScene_->readBackKinematics(
+                std::span<marble::physics::PhysicsBodyId const>(marbleBodyIds_.data(), marbleCount_),
+                marbles.data(),
+                marbleCount_);
         }
 
         if (auto* w = engine.window()) {
@@ -1811,7 +2145,8 @@ struct GardenGame::State final {
                 (void)std::snprintf(
                     buf,
                     sizeof(buf),
-                    "Garden — Listen host — tick %llu — Esc · WASD · Space · E/C · flick",
+                    "Garden — Listen UDP :%u — tick %llu — Esc · WASD · Space · E/C",
+                    static_cast<unsigned>(hostListenPort_),
                     static_cast<unsigned long long>(ctx.frameIndex));
             } else {
                 (void)std::snprintf(
@@ -1837,6 +2172,154 @@ struct GardenGame::State final {
             }
         }
 
+        if (sessionKind_ == GardenSessionKind::RemoteClient && clientSession_.state() == ConnectionState::Connected &&
+            clientSession_.hasServerTimeSync() && snapInterp_.frameCount() > 0u) {
+            applyRemoteSnapshotInterpTunables();
+            std::uint32_t const delayMin = gardenRemoteEnvU32(
+                "GARDEN_REMOTE_INTERP_DELAY_MIN_TICKS", kGardenRemoteInterpDelayMinTicks, 1u, 30u);
+            std::uint32_t delayMax = gardenRemoteEnvU32(
+                "GARDEN_REMOTE_INTERP_DELAY_MAX_TICKS", kGardenRemoteInterpDelayMaxTicks, 1u, 30u);
+            if (delayMax < delayMin) {
+                delayMax = delayMin;
+            }
+            float const rtt = clientSession_.estimatedRttSeconds();
+            if (rtt > 1e-5f) {
+                std::uint32_t const delayTicks = static_cast<std::uint32_t>(
+                    rtt * 0.5f * kGardenRemoteServerSimulationHz);
+                snapInterp_.setRenderDelayTicks(std::max(delayMin, std::min(delayMax, delayTicks)));
+            }
+            float const targetTickF = clientSession_.estimatedServerSimTickAtNow(kGardenRemoteServerSimulationHz) -
+                static_cast<float>(snapInterp_.renderDelayTicks());
+            std::array<InterpolatedEntity, 16> interpolated{};
+            std::size_t const interpCount =
+                snapInterp_.interpolate(targetTickF, interpolated.data(), interpolated.size());
+            remoteDisplayYaw_.fill(0.f);
+            std::size_t const localSlot = localViewMarbleIndex();
+            EntityKinematicsSnapshot latestRaw{};
+            float const clampMinSpeed = gardenRemoteEnvF32(
+                "GARDEN_REMOTE_CLAMP_MIN_SPEED", kGardenRemoteLatestClampMinSpeedMps, 0.f, 100.f);
+            float const clampDv = gardenRemoteEnvF32(
+                "GARDEN_REMOTE_CLAMP_DV", kGardenRemoteLatestClampDvMps, 0.f, 200.f);
+            for (std::size_t i = 0u; i < interpCount; ++i) {
+                std::uint64_t const g = interpolated[i].entity.guid;
+                if (g < 0x1000u) {
+                    continue;
+                }
+                std::size_t const idx = static_cast<std::size_t>(g - 0x1000u);
+                if (idx < marbleCount_) {
+                    marbles[idx].position = interpolated[i].position;
+                    marbles[idx].linearVelocity = interpolated[i].velocity;
+                }
+                if (idx < remoteDisplayYaw_.size()) {
+                    remoteDisplayYaw_[idx] = interpolated[i].yawRadians;
+                }
+            }
+            for (std::size_t i = 0u; i < interpCount; ++i) {
+                std::uint64_t const g = interpolated[i].entity.guid;
+                if (g < 0x1000u) {
+                    continue;
+                }
+                std::size_t const idx = static_cast<std::size_t>(g - 0x1000u);
+                if (idx >= marbleCount_ || idx == localSlot || !interpolated[i].extrapolated) {
+                    continue;
+                }
+                float dvBetweenFrames{};
+                bool const hasDv = snapInterp_.tryVelocityDeltaBetweenLastTwoFrames(interpolated[i].entity, dvBetweenFrames);
+                float const speed = marble::math::length(interpolated[i].velocity);
+                bool const needLatestClamp = speed >= clampMinSpeed || (hasDv && dvBetweenFrames >= clampDv);
+                if (!needLatestClamp) {
+                    continue;
+                }
+                if (snapInterp_.tryLatestKinematics(interpolated[i].entity, latestRaw)) {
+                    marbles[idx].position = latestRaw.positionLocal;
+                    marbles[idx].linearVelocity = latestRaw.linearVelocity;
+                    if (idx < remoteDisplayYaw_.size()) {
+                        remoteDisplayYaw_[idx] = latestRaw.yawRadians;
+                    }
+                }
+            }
+        }
+
+        bool const remoteNoPredict = gardenRemoteEnvTruthy("GARDEN_REMOTE_NO_PREDICT");
+        bool const remoteDesyncLog = gardenRemoteEnvTruthy("GARDEN_REMOTE_DESYNC_LOG");
+        int const desyncPeriodMs = gardenRemoteDesyncLogPeriodMs();
+
+        if (sessionKind_ == GardenSessionKind::RemoteClient && clientSession_.state() == ConnectionState::Connected) {
+            PeerId const ap = clientSession_.assignedPeerId();
+            if (ap >= 2u) {
+                std::size_t const slot = static_cast<std::size_t>(ap) - 2u;
+                if (slot < marbleCount_) {
+                    Vec3 const posAfterInterp = marbles[slot].position;
+
+                    if (!remoteNoPredict) {
+                        float const fdt = static_cast<float>(ctx.deltaSeconds);
+                        marble::garden::applyGardenMarblePlayerStep(
+                            marbles[slot],
+                            layout,
+                            pendingMoveX_,
+                            pendingMoveZ_,
+                            (pendingButtons_ & kClientInputButton_Jump) != 0,
+                            jumpWasHeld_,
+                            jumpChargeSec_,
+                            fdt,
+                            kMarbleRadius);
+                    }
+
+                    Vec3 const posAfterPredict = marbles[slot].position;
+
+                    if (!remoteNoPredict) {
+                        if (slot < remoteAuthMarbleValid_.size() && remoteAuthMarbleValid_[slot]) {
+                            marble::garden::RemoteAuthorityReconcileResult const rec =
+                                marble::garden::reconcileEmergencyPositionSnap(
+                                    marbles[slot].position,
+                                    remoteAuthMarblePos_[slot],
+                                    kGardenRemoteReconcileSnapThresholdM);
+                            if (rec.hardSnapped) {
+                                ++desyncPosSnapCount_;
+                            }
+                        }
+                    }
+
+                    Vec3 const posAfterReconcile = marbles[slot].position;
+
+                    if (remoteDesyncLog && slot < remoteAuthMarbleValid_.size() &&
+                        remoteAuthMarbleValid_[slot]) {
+                        auto const now = std::chrono::steady_clock::now();
+                        bool shouldLog = false;
+                        if (!lastDesyncLogTime_.has_value()) {
+                            shouldLog = true;
+                        } else if (std::chrono::duration_cast<std::chrono::milliseconds>(now - *lastDesyncLogTime_)
+                                       .count() >= desyncPeriodMs) {
+                            shouldLog = true;
+                        }
+                        if (shouldLog) {
+                            lastDesyncLogTime_ = now;
+                            Vec3 const authPos = remoteAuthMarblePos_[slot];
+                            float const interpErr =
+                                std::sqrt(marble::math::lengthSquared(posAfterInterp - authPos));
+                            float const predErr =
+                                std::sqrt(marble::math::lengthSquared(posAfterPredict - authPos));
+                            float const reconciledErr =
+                                std::sqrt(marble::math::lengthSquared(posAfterReconcile - authPos));
+                            std::fprintf(
+                                stderr,
+                                "[Garden desync] no_pred=%d rtt_s=%.3f ack_tick=%u "
+                                "pos_err_interp_m=%.4f pos_err_after_predict_m=%.4f pos_err_after_reconcile_m=%.4f "
+                                "hard_snaps=%llu snap_thresh_m=%.3f\n",
+                                remoteNoPredict ? 1 : 0,
+                                static_cast<double>(clientSession_.estimatedRttSeconds()),
+                                static_cast<unsigned>(lastAckedServerSimTick_),
+                                static_cast<double>(interpErr),
+                                static_cast<double>(predErr),
+                                static_cast<double>(reconciledErr),
+                                static_cast<unsigned long long>(desyncPosSnapCount_),
+                                static_cast<double>(kGardenRemoteReconcileSnapThresholdM));
+                        }
+                    }
+                }
+            }
+        }
+
         int fbW = 1, fbH = 1;
         if (auto* w = engine.window()) {
             w->getFramebufferSize(&fbW, &fbH);
@@ -1844,7 +2327,8 @@ struct GardenGame::State final {
         float const aspect = static_cast<float>(fbW) / static_cast<float>(std::max(1, fbH));
         constexpr float fovy = 60.f * 3.14159265f / 180.f;
 
-        Vec3 const player = marbles[0].position;
+        std::size_t const viewMarble = localViewMarbleIndex();
+        Vec3 const player = marbles[viewMarble].position;
         float const sx = std::sin(camYaw);
         float const cz = std::cos(camYaw);
         Vec3 const eye = player + Vec3{sx * camDist, camHeight, cz * camDist};
@@ -1888,12 +2372,19 @@ struct GardenGame::State final {
             pushMesh(meshProps[mid], model, col);
         }
 
-        for (std::size_t mi = 0; mi < marbles.size(); ++mi) {
+        for (std::size_t mi = 0; mi < marbleCount_; ++mi) {
             MeshDrawInstance d{};
+            Vec3 const col =
+                mi == localViewMarbleIndex() ? Vec3{0.52f, 0.78f, 0.95f} : Vec3{0.82f, 0.88f, 0.92f};
             d.meshIndex = meshSphere;
-            d.model = Mat4::translation(marbles[mi].position) * Mat4::scaling({kMarbleRadius, kMarbleRadius, kMarbleRadius});
-            d.color = mi == 0 ? Vec3{0.52f, 0.78f, 0.95f} : Vec3{0.82f, 0.88f, 0.92f};
-            if (mi == 0) {
+            Mat4 model = Mat4::translation(marbles[mi].position);
+            if (mi < remoteAuthMarbleYawValid_.size() && remoteAuthMarbleYawValid_[mi]) {
+                model = model * Mat4::rotationY(remoteDisplayYaw_[mi]);
+            }
+            d.model = model * Mat4::scaling({kMarbleRadius, kMarbleRadius, kMarbleRadius});
+            d.color = col;
+            d.drawFlags = marble::render::kPcFlagMeshEmissive;
+            if (mi == localViewMarbleIndex()) {
                 d.materialId = kMaterialTranslucent;
                 d.drawLayer = 1;
                 d.colorAlpha = 0.55f;
@@ -1954,20 +2445,29 @@ bool GardenGame::initGraphics(std::string shaderDirectory, std::optional<std::ui
     std::string const assetsRoot = engine_.assetsRootPath();
     if (!assetsRoot.empty()) {
         (void)marble::core::setBinaryResourceSearchRoot(state_->assetRegistry_, std::filesystem::path(assetsRoot));
-        if (state_->assetRegistry_.acquire("shaders/mesh.vert.spv") &&
-            state_->assetRegistry_.acquire("shaders/mesh.frag.spv")) {
-            marble::core::BinaryResource const* const vertRes = state_->assetRegistry_.find("shaders/mesh.vert.spv");
-            marble::core::BinaryResource const* const fragRes = state_->assetRegistry_.find("shaders/mesh.frag.spv");
-            if (vertRes != nullptr && fragRes != nullptr) {
-                std::span<std::uint8_t const> const vspan(vertRes->bytes.data(), vertRes->bytes.size());
-                std::span<std::uint8_t const> const fspan(fragRes->bytes.data(), fragRes->bytes.size());
+        if (marble::game_shared::acquireAllSampleMeshRegistryShaders(state_->assetRegistry_)) {
+            std::span<std::uint8_t const> vspan;
+            std::span<std::uint8_t const> fspan;
+            std::span<std::uint8_t const> espan;
+            if (marble::game_shared::sampleMeshRegistrySpirvSpansForInit(state_->assetRegistry_, vspan, fspan, espan)) {
                 vkOk = state_->rhi.initFromSpirvBytes(
-                    *engine_.window(), "Garden", vspan, fspan, physicalDeviceIndex);
+                    *engine_.window(), "Garden", vspan, fspan, physicalDeviceIndex, espan);
             }
         }
     }
     if (!vkOk) {
-        if (!state_->rhi.init(*engine_.window(), "Garden", std::move(shaderDirectory), physicalDeviceIndex)) {
+        std::vector<std::uint8_t> vertDisk;
+        std::vector<std::uint8_t> fragDisk;
+        std::vector<std::uint8_t> emDisk;
+        if (!marble::game_shared::loadSampleMeshSpirvFromShaderDirectory(
+                std::filesystem::path(shaderDirectory), vertDisk, fragDisk, emDisk) ||
+            !state_->rhi.initFromSpirvBytes(
+                *engine_.window(),
+                "Garden",
+                std::span(vertDisk.data(), vertDisk.size()),
+                std::span(fragDisk.data(), fragDisk.size()),
+                physicalDeviceIndex,
+                std::span(emDisk.data(), emDisk.size()))) {
             return false;
         }
     }

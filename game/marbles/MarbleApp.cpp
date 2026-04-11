@@ -9,6 +9,8 @@
 #include "render/DrawFlags.hpp"
 #include "render/IRenderBackend.hpp"
 #include "render/vulkan/VulkanRhi.hpp"
+#include "shared/LoadMeshSampleSpirv.hpp"
+#include "shared/SampleMeshShaderResources.hpp"
 #include "ui/EasyFontMesh.hpp"
 #include "ui/NdcRect.hpp"
 
@@ -147,7 +149,7 @@ struct LandingState {
             idx
         );
         marble::ui::appendEasyFontTextPx(
-            "Garden - listen host (dev)",
+            "Garden - listen host UDP (default :27778, env GARDEN_LISTEN_PORT)",
             56.f,
             static_cast<float>(kMenuRowBaseY + 2 * kMenuRowStep),
             fbW,
@@ -347,20 +349,30 @@ public:
         std::string const assetsRoot = engine_.assetsRootPath();
         if (!assetsRoot.empty()) {
             (void)marble::core::setBinaryResourceSearchRoot(state_->assetRegistry_, std::filesystem::path(assetsRoot));
-            if (state_->assetRegistry_.acquire("shaders/mesh.vert.spv") &&
-                state_->assetRegistry_.acquire("shaders/mesh.frag.spv")) {
-                marble::core::BinaryResource const* const vertRes = state_->assetRegistry_.find("shaders/mesh.vert.spv");
-                marble::core::BinaryResource const* const fragRes = state_->assetRegistry_.find("shaders/mesh.frag.spv");
-                if (vertRes != nullptr && fragRes != nullptr) {
-                    std::span<std::uint8_t const> const vspan(vertRes->bytes.data(), vertRes->bytes.size());
-                    std::span<std::uint8_t const> const fspan(fragRes->bytes.data(), fragRes->bytes.size());
+            if (marble::game_shared::acquireAllSampleMeshRegistryShaders(state_->assetRegistry_)) {
+                std::span<std::uint8_t const> vspan;
+                std::span<std::uint8_t const> fspan;
+                std::span<std::uint8_t const> espan;
+                if (marble::game_shared::sampleMeshRegistrySpirvSpansForInit(
+                        state_->assetRegistry_, vspan, fspan, espan)) {
                     vkOk = state_->rhi.initFromSpirvBytes(
-                        *engine_.window(), "Marble", vspan, fspan, physicalDeviceIndex_);
+                        *engine_.window(), "Marble", vspan, fspan, physicalDeviceIndex_, espan);
                 }
             }
         }
         if (!vkOk) {
-            if (!state_->rhi.init(*engine_.window(), "Marble", shaderDirectory_, physicalDeviceIndex_)) {
+            std::vector<std::uint8_t> vertDisk;
+            std::vector<std::uint8_t> fragDisk;
+            std::vector<std::uint8_t> emDisk;
+            if (!marble::game_shared::loadSampleMeshSpirvFromShaderDirectory(
+                    std::filesystem::path(shaderDirectory_), vertDisk, fragDisk, emDisk) ||
+                !state_->rhi.initFromSpirvBytes(
+                    *engine_.window(),
+                    "Marble",
+                    std::span(vertDisk.data(), vertDisk.size()),
+                    std::span(fragDisk.data(), fragDisk.size()),
+                    physicalDeviceIndex_,
+                    std::span(emDisk.data(), emDisk.size()))) {
                 return false;
             }
         }

@@ -9,10 +9,13 @@
 #include "math/Vec3.hpp"
 #include "physics/PhysicsIntegration.hpp"
 #include "platform/window/Window.hpp"
+#include "render/DrawFlags.hpp"
 #include "render/IRenderBackend.hpp"
 #include "render/MaterialId.hpp"
 #include "render/RenderTypes.hpp"
 #include "render/vulkan/VulkanRhi.hpp"
+#include "shared/LoadMeshSampleSpirv.hpp"
+#include "shared/SampleMeshShaderResources.hpp"
 #include "shared/PauseMenuInput.hpp"
 
 #include <algorithm>
@@ -49,6 +52,7 @@ using marble::physics::RigidBodyKinematics;
 using marble::physics::IPhysicsWorld;
 using marble::physics::SimplePhysicsWorld;
 using marble::render::FrameOverlayTint;
+using marble::render::kPcFlagMeshEmissive;
 using marble::render::IRenderBackend;
 using marble::render::kMaterialTranslucent;
 using marble::render::MeshDrawInstance;
@@ -605,11 +609,12 @@ struct MarblesGame::State final {
         drawScratch.clear();
         drawScratch.reserve(32);
 
-        auto pushCube = [&](Mat4 const& model, Vec3 color) {
+        auto pushCube = [&](Mat4 const& model, Vec3 color, std::uint32_t drawFlags = 0) {
             MeshDrawInstance d{};
             d.meshIndex = meshCube;
             d.model = model;
             d.color = color;
+            d.drawFlags = drawFlags;
             drawScratch.push_back(d);
         };
 
@@ -645,7 +650,10 @@ struct MarblesGame::State final {
             }
             Vec3 const ext = (p.box.max - p.box.min) * 0.5f;
             Vec3 const ctr = (p.box.min + p.box.max) * 0.5f;
-            pushCube(board * Mat4::translation(ctr) * Mat4::scaling(ext * 2.f), {0.95f, 0.85f, 0.2f});
+            pushCube(
+                board * Mat4::translation(ctr) * Mat4::scaling(ext * 2.f),
+                {0.95f, 0.85f, 0.2f},
+                kPcFlagMeshEmissive);
         }
 
         {
@@ -711,21 +719,30 @@ bool MarblesGame::initGraphics(std::string shaderDirectory, std::optional<std::u
     std::string const assetsRoot = engine_.assetsRootPath();
     if (!assetsRoot.empty()) {
         (void)marble::core::setBinaryResourceSearchRoot(state_->assetRegistry_, std::filesystem::path(assetsRoot));
-        // ResourceKind::ShaderBytecode — registry path matches staged `assets/shaders/*.spv`.
-        if (state_->assetRegistry_.acquire("shaders/mesh.vert.spv") &&
-            state_->assetRegistry_.acquire("shaders/mesh.frag.spv")) {
-            marble::core::BinaryResource const* const vertRes = state_->assetRegistry_.find("shaders/mesh.vert.spv");
-            marble::core::BinaryResource const* const fragRes = state_->assetRegistry_.find("shaders/mesh.frag.spv");
-            if (vertRes != nullptr && fragRes != nullptr) {
-                std::span<std::uint8_t const> const vspan(vertRes->bytes.data(), vertRes->bytes.size());
-                std::span<std::uint8_t const> const fspan(fragRes->bytes.data(), fragRes->bytes.size());
+        // ResourceKind::ShaderBytecode — virtual paths from generated `MarbleSampleShaderNames.hpp`.
+        if (marble::game_shared::acquireAllSampleMeshRegistryShaders(state_->assetRegistry_)) {
+            std::span<std::uint8_t const> vspan;
+            std::span<std::uint8_t const> fspan;
+            std::span<std::uint8_t const> espan;
+            if (marble::game_shared::sampleMeshRegistrySpirvSpansForInit(state_->assetRegistry_, vspan, fspan, espan)) {
                 vkOk = state_->rhi.initFromSpirvBytes(
-                    *engine_.window(), "Marbles", vspan, fspan, physicalDeviceIndex);
+                    *engine_.window(), "Marbles", vspan, fspan, physicalDeviceIndex, espan);
             }
         }
     }
     if (!vkOk) {
-        if (!state_->rhi.init(*engine_.window(), "Marbles", std::move(shaderDirectory), physicalDeviceIndex)) {
+        std::vector<std::uint8_t> vertDisk;
+        std::vector<std::uint8_t> fragDisk;
+        std::vector<std::uint8_t> emDisk;
+        if (!marble::game_shared::loadSampleMeshSpirvFromShaderDirectory(
+                std::filesystem::path(shaderDirectory), vertDisk, fragDisk, emDisk) ||
+            !state_->rhi.initFromSpirvBytes(
+                *engine_.window(),
+                "Marbles",
+                std::span(vertDisk.data(), vertDisk.size()),
+                std::span(fragDisk.data(), fragDisk.size()),
+                physicalDeviceIndex,
+                std::span(emDisk.data(), emDisk.size()))) {
             return false;
         }
     }

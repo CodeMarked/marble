@@ -29,6 +29,7 @@ int main(int argc, char** argv)
     std::string joinHost;
     std::uint16_t joinPort = 27778u;
     std::uint32_t joinSeed = marble::garden::kGardenDedicatedServerDefaultLayoutSeed;
+    std::uint32_t joinToken = 0u;
     bool joinMode = false;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -64,6 +65,17 @@ int main(int argc, char** argv)
                 return 2;
             }
             joinSeed = static_cast<std::uint32_t>(v);
+            continue;
+        }
+        if (arg == "--join-token" && (i + 1) < argc) {
+            char const* s = argv[++i];
+            char* end{};
+            unsigned long const v = std::strtoul(s, &end, 0);
+            if (end == s || *end != '\0' || v > 4294967295ul) {
+                (void)logPrintf(0, kGeneral, "Invalid value for --join-token");
+                return 2;
+            }
+            joinToken = static_cast<std::uint32_t>(v);
             continue;
         }
         if (arg == "--assets" && (i + 1) < argc) {
@@ -127,6 +139,7 @@ int main(int argc, char** argv)
             }
             joinOpts.port = joinPort;
             joinOpts.layoutSeed = joinSeed;
+            joinOpts.joinTokenU32 = joinToken;
             exitCode = marble::marbles_app::runGameplaySession(
                 engine,
                 marble::marbles_app::PostLandingAction::GardenRemoteClient,

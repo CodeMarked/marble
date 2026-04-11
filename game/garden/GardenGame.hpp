@@ -25,6 +25,8 @@ struct RemoteClientParams {
     /// Procedural garden layout; **must** match the dedicated server's `--seed` or the ball will look buried
     /// and the world will not match snapshots (`marble::garden::kGardenDedicatedServerDefaultLayoutSeed`).
     std::uint32_t layoutSeed = 42u;
+    /// Must match dedicated server [`SessionConfig::joinTokenU32`] when the server requires a join token.
+    std::uint32_t joinTokenU32 = 0u;
 };
 
 /// Phase-1 sample: fixed-step garden physics, two marbles, third-person camera, mouse flick.
@@ -41,6 +43,7 @@ public:
 
     void installPhases();
 
+    /// After `engine.init()` when not headless: same SPIR-V load path as `MarblesGame::initGraphics`.
     [[nodiscard]] bool initGraphics(
         std::string shaderDirectory,
         std::optional<std::uint32_t> physicalDeviceIndex = std::nullopt

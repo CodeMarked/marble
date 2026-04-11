@@ -26,7 +26,9 @@ if(NOT MARBLE_GLSLC)
 
 endif()
 
+set(MARBLE_GLSLC_TARGET_ENV "vulkan1.2" CACHE STRING "glslc --target-env for Marble sample shaders")
 
+set(MARBLE_GLSLC_EXTRA_FLAGS "" CACHE STRING "Extra glslc args for sample shaders (CMake list, e.g. -g or -O)")
 
 set(MARBLE_SHADER_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/marbles/shaders)
 
@@ -34,15 +36,29 @@ set(MARBLE_SHADER_SPV_DIR ${CMAKE_CURRENT_BINARY_DIR}/marbles_shaders)
 
 file(MAKE_DIRECTORY ${MARBLE_SHADER_SPV_DIR})
 
-
-
 include(FetchContent)
 
+set(MARBLE_SHADER_GLSL_MODULES mesh.vert mesh.frag mesh_emissive.frag)
 
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
+
+set(MARBLE_SAMPLE_SHADER_REGISTRY_PATHS_BODY "")
+set(MARBLE_SAMPLE_SHADER_BASENAME_PATHS_BODY "")
+foreach(_marble_shader_mod ${MARBLE_SHADER_GLSL_MODULES})
+    set(_marble_spv "${_marble_shader_mod}.spv")
+    string(APPEND MARBLE_SAMPLE_SHADER_REGISTRY_PATHS_BODY "    \"shaders/${_marble_spv}\",\n")
+    string(APPEND MARBLE_SAMPLE_SHADER_BASENAME_PATHS_BODY "    \"${_marble_spv}\",\n")
+endforeach()
+
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/MarbleSampleShaderNames.hpp.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/MarbleSampleShaderNames.hpp"
+    @ONLY
+)
 
 set(MARBLE_SHADER_SPVS "")
 
-foreach(NAME mesh.vert mesh.frag)
+foreach(NAME ${MARBLE_SHADER_GLSL_MODULES})
 
     set(SPV ${MARBLE_SHADER_SPV_DIR}/${NAME}.spv)
 
@@ -50,7 +66,7 @@ foreach(NAME mesh.vert mesh.frag)
 
         OUTPUT ${SPV}
 
-        COMMAND ${MARBLE_GLSLC} --target-env=vulkan1.2 -o ${SPV} ${MARBLE_SHADER_SRC_DIR}/${NAME}
+        COMMAND ${MARBLE_GLSLC} ${MARBLE_GLSLC_EXTRA_FLAGS} --target-env=${MARBLE_GLSLC_TARGET_ENV} -o ${SPV} ${MARBLE_SHADER_SRC_DIR}/${NAME}
 
         DEPENDS ${MARBLE_SHADER_SRC_DIR}/${NAME}
 
@@ -73,6 +89,8 @@ add_custom_target(marbles_shaders DEPENDS ${MARBLE_SHADER_SPVS})
 add_library(garden_sim STATIC
 
     garden/GardenSimulation.cpp
+
+    garden/GardenAuthorityTick.cpp
 
 )
 
@@ -107,6 +125,8 @@ target_include_directories(marbles
 PRIVATE
 
     ${CMAKE_CURRENT_SOURCE_DIR}
+
+    ${CMAKE_CURRENT_BINARY_DIR}/generated
 
 )
 

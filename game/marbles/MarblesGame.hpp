@@ -16,7 +16,8 @@ public:
     explicit MarblesGame(core::Engine& engine);
     ~MarblesGame();
 
-    /// Call after `engine.init()` when not headless. Loads shaders from `shaderDirectory`.
+    /// After `engine.init()` when not headless: registry + `initFromSpirvBytes` if assets root resolves, else disk
+    /// SPIR-V from paths in generated `MarbleSampleShaderNames.hpp` (driven by `MARBLE_SHADER_GLSL_MODULES`).
     [[nodiscard]] bool initGraphics(
         std::string shaderDirectory,
         std::optional<std::uint32_t> physicalDeviceIndex = std::nullopt
