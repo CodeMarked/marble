@@ -53,6 +53,7 @@ bool UdpGameTransport::bind(std::uint16_t port) noexcept {
         shutdown();
         return false;
     }
+    minJoinerPeerId_ = 2u;
     bound_ = true;
     ingressHead_ = 0u;
     ingressCount_ = 0u;
@@ -112,11 +113,16 @@ bool UdpGameTransport::hasFreePeerSlot() const noexcept {
     return active < kMaxPeers;
 }
 
+void UdpGameTransport::setMinimumJoinerPeerId(PeerId id) noexcept {
+    minJoinerPeerId_ = id < 2u ? 2u : id;
+}
+
 PeerId UdpGameTransport::allocateJoinerPeerId() const noexcept {
     if (!hasFreePeerSlot()) {
         return kInvalidPeerId;
     }
-    for (PeerId cand = 2u; cand < 500u; ++cand) {
+    PeerId const start = minJoinerPeerId_ < 2u ? 2u : minJoinerPeerId_;
+    for (PeerId cand = start; cand < 500u; ++cand) {
         if (findPeerById(cand) == nullptr) {
             return cand;
         }

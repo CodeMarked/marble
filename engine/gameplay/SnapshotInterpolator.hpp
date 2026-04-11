@@ -1,8 +1,11 @@
 #pragma once
 
 #include "gameplay/MultiplayerWireFormat.hpp"
+#include "math/Vec3.hpp"
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 
@@ -16,6 +19,7 @@ struct InterpolatedEntity {
     WorldObjectRef entity{};
     math::Vec3 position{};
     math::Vec3 velocity{};
+    float yawRadians{};
     PhysicsSimulationTier tier{PhysicsSimulationTier::Contact};
     bool extrapolated{};
 };
@@ -24,8 +28,8 @@ struct InterpolatedEntity {
 /// produces smooth per-entity state at an arbitrary render tick in server
 /// simTick space ([ADR-0060] §2 interpolation delay baseline).
 ///
-/// Operates entirely in **server simTick** coordinates. The caller converts
-/// client time to a server-space render tick (or uses `suggestRenderTick()`).
+/// Operates in **server simTick** coordinates. Callers pass a `float` render tick
+/// (fractional allowed) from wall-clock mapping or `static_cast<float>(suggestRenderTick())`.
 template <std::size_t MaxEntities = 16, std::size_t TimelineCapacity = 16>
 class SnapshotInterpolator {
 public:
@@ -53,8 +57,22 @@ public:
     void setRenderDelayTicks(std::uint32_t ticks) noexcept { renderDelayTicks_ = ticks; }
     void setMaxExtrapolationTicks(std::uint32_t ticks) noexcept { maxExtrapolationTicks_ = ticks; }
 
+    /// 0 = disabled. When \|v_new − v_old\| between bracketing frames meets threshold, lerp position but use **newer** velocity (avoid blending through impulses).
+    void setVelocityJumpBlendThresholdMps(float metersPerSecond) noexcept {
+        velocityJumpBlendThresholdMps_ = metersPerSecond > 0.f ? metersPerSecond : 0.f;
+    }
+
+    /// 0 = disabled. When extrapolating past the newest frame, per-entity integration uses dt = 0 if velocity jumped vs the previous frame by at least this much.
+    void setVelocityJumpExtrapolationThresholdMps(float metersPerSecond) noexcept {
+        velocityJumpExtrapolationThresholdMps_ = metersPerSecond > 0.f ? metersPerSecond : 0.f;
+    }
+
     [[nodiscard]] std::uint32_t renderDelayTicks() const noexcept { return renderDelayTicks_; }
     [[nodiscard]] std::uint32_t maxExtrapolationTicks() const noexcept { return maxExtrapolationTicks_; }
+    [[nodiscard]] float velocityJumpBlendThresholdMps() const noexcept { return velocityJumpBlendThresholdMps_; }
+    [[nodiscard]] float velocityJumpExtrapolationThresholdMps() const noexcept {
+        return velocityJumpExtrapolationThresholdMps_;
+    }
     [[nodiscard]] std::size_t frameCount() const noexcept { return frameCount_; }
 
     void pushSnapshot(
@@ -91,9 +109,41 @@ public:
         return (latest > renderDelayTicks_) ? (latest - renderDelayTicks_) : 0u;
     }
 
+    /// Newest buffered frame only: copy kinematics for `ref` if present (for clamping extrapolated remote poses).
+    [[nodiscard]] bool tryLatestKinematics(WorldObjectRef ref, EntityKinematicsSnapshot& out) const noexcept {
+        if (frameCount_ == 0u) {
+            return false;
+        }
+        Frame const& f = *frameAtIndex(frameCount_ - 1u);
+        for (std::size_t i = 0u; i < f.entityCount; ++i) {
+            if (f.entities[i].entity == ref) {
+                out = f.entities[i];
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// \|v_newest − v_penultimate\| for `ref` if present in both frames; false if fewer than two frames or entity missing from either.
+    [[nodiscard]] bool tryVelocityDeltaBetweenLastTwoFrames(WorldObjectRef ref, float& outDeltaMps) const noexcept {
+        if (frameCount_ < 2u) {
+            return false;
+        }
+        Frame const& older = *frameAtIndex(frameCount_ - 2u);
+        Frame const& newer = *frameAtIndex(frameCount_ - 1u);
+        EntityKinematicsSnapshot const* ea = findEntity(older, ref);
+        EntityKinematicsSnapshot const* eb = findEntity(newer, ref);
+        if (ea == nullptr || eb == nullptr) {
+            return false;
+        }
+        outDeltaMps = math::length(eb->linearVelocity - ea->linearVelocity);
+        return std::isfinite(outDeltaMps);
+    }
+
     /// Produce interpolated entity state at `renderTick` (server simTick space).
+    /// Fractional values enable sub-tick blending between snapshot frames.
     [[nodiscard]] std::size_t interpolate(
-        std::uint32_t renderTick,
+        float renderTick,
         InterpolatedEntity* out,
         std::size_t maxOut
     ) const noexcept {
@@ -111,7 +161,9 @@ public:
         for (std::size_t i = 0u; i + 1u < frameCount_; ++i) {
             Frame const* a = frameAtIndex(i);
             Frame const* b = frameAtIndex(i + 1u);
-            if (a->simTick <= renderTick && b->simTick >= renderTick) {
+            float const aTick = static_cast<float>(a->simTick);
+            float const bTick = static_cast<float>(b->simTick);
+            if (aTick <= renderTick && bTick >= renderTick) {
                 older = a;
                 newer = b;
                 break;
@@ -123,7 +175,7 @@ public:
         }
 
         Frame const* oldest = frameAtIndex(0u);
-        if (renderTick < oldest->simTick) {
+        if (renderTick < static_cast<float>(oldest->simTick)) {
             return emitFrame(*oldest, out, maxOut, true);
         }
 
@@ -146,22 +198,23 @@ private:
         std::size_t const count = (frame.entityCount < maxOut) ? frame.entityCount : maxOut;
         for (std::size_t i = 0u; i < count; ++i) {
             auto const& e = frame.entities[i];
-            out[i] = InterpolatedEntity{e.entity, e.positionLocal, e.linearVelocity, e.tier, extrapolated};
+            out[i] = InterpolatedEntity{
+                e.entity, e.positionLocal, e.linearVelocity, e.yawRadians, e.tier, extrapolated};
         }
         return count;
     }
 
-    [[nodiscard]] static std::size_t interpolateFrames(
+    [[nodiscard]] std::size_t interpolateFrames(
         Frame const& older,
         Frame const& newer,
-        std::uint32_t renderTick,
+        float renderTick,
         InterpolatedEntity* out,
         std::size_t maxOut
-    ) noexcept {
-        std::uint32_t const span = newer.simTick - older.simTick;
-        float const t = (span > 0u)
-            ? static_cast<float>(renderTick - older.simTick) / static_cast<float>(span)
-            : 0.f;
+    ) const noexcept {
+        float const olderF = static_cast<float>(older.simTick);
+        float const newerF = static_cast<float>(newer.simTick);
+        float const span = newerF - olderF;
+        float const t = (span > 0.f) ? (renderTick - olderF) / span : 0.f;
 
         std::size_t count = 0u;
 
@@ -169,16 +222,28 @@ private:
             auto const& ea = older.entities[i];
             EntityKinematicsSnapshot const* eb = findEntity(newer, ea.entity);
             if (eb != nullptr) {
+                math::Vec3 const pos = math::lerp(ea.positionLocal, eb->positionLocal, t);
+                bool const jumpVel = velocityJumpBlendThresholdMps_ > 0.f &&
+                    math::length(eb->linearVelocity - ea.linearVelocity) >= velocityJumpBlendThresholdMps_;
+                math::Vec3 const vel =
+                    jumpVel ? eb->linearVelocity
+                            : math::lerp(ea.linearVelocity, eb->linearVelocity, t);
                 out[count++] = InterpolatedEntity{
                     ea.entity,
-                    math::lerp(ea.positionLocal, eb->positionLocal, t),
-                    math::lerp(ea.linearVelocity, eb->linearVelocity, t),
+                    pos,
+                    vel,
+                    math::lerpAngleRadians(ea.yawRadians, eb->yawRadians, t),
                     (t < 0.5f) ? ea.tier : eb->tier,
                     false
                 };
             } else {
                 out[count++] = InterpolatedEntity{
-                    ea.entity, ea.positionLocal, ea.linearVelocity, ea.tier, true
+                    ea.entity,
+                    ea.positionLocal,
+                    ea.linearVelocity,
+                    ea.yawRadians,
+                    ea.tier,
+                    true
                 };
             }
         }
@@ -187,7 +252,12 @@ private:
             auto const& eb = newer.entities[i];
             if (findEntity(older, eb.entity) == nullptr) {
                 out[count++] = InterpolatedEntity{
-                    eb.entity, eb.positionLocal, eb.linearVelocity, eb.tier, true
+                    eb.entity,
+                    eb.positionLocal,
+                    eb.linearVelocity,
+                    eb.yawRadians,
+                    eb.tier,
+                    true
                 };
             }
         }
@@ -197,22 +267,37 @@ private:
 
     [[nodiscard]] std::size_t extrapolateFrame(
         Frame const& frame,
-        std::uint32_t renderTick,
+        float renderTick,
         InterpolatedEntity* out,
         std::size_t maxOut
     ) const noexcept {
-        std::uint32_t const delta = renderTick - frame.simTick;
-        std::uint32_t const clamped =
-            (delta <= maxExtrapolationTicks_) ? delta : maxExtrapolationTicks_;
-        float const dt = static_cast<float>(clamped);
+        float const delta = std::max(0.f, renderTick - static_cast<float>(frame.simTick));
+        float const clamped = std::min(delta, static_cast<float>(maxExtrapolationTicks_));
+        float const dtDefault = clamped;
+
+        Frame const* prev = nullptr;
+        if (frameCount_ >= 2u && velocityJumpExtrapolationThresholdMps_ > 0.f) {
+            prev = frameAtIndex(frameCount_ - 2u);
+        }
 
         std::size_t const count = (frame.entityCount < maxOut) ? frame.entityCount : maxOut;
         for (std::size_t i = 0u; i < count; ++i) {
             auto const& e = frame.entities[i];
+            float dt = dtDefault;
+            if (prev != nullptr) {
+                EntityKinematicsSnapshot const* ep = findEntity(*prev, e.entity);
+                if (ep != nullptr) {
+                    float const dv = math::length(e.linearVelocity - ep->linearVelocity);
+                    if (dv >= velocityJumpExtrapolationThresholdMps_) {
+                        dt = 0.f;
+                    }
+                }
+            }
             out[i] = InterpolatedEntity{
                 e.entity,
                 e.positionLocal + e.linearVelocity * dt,
                 e.linearVelocity,
+                e.yawRadians,
                 e.tier,
                 true
             };
@@ -237,6 +322,8 @@ private:
     std::size_t frameCount_{};
     std::uint32_t renderDelayTicks_{kDefaultRenderDelayTicks};
     std::uint32_t maxExtrapolationTicks_{kDefaultMaxExtrapolationTicks};
+    float velocityJumpBlendThresholdMps_{};
+    float velocityJumpExtrapolationThresholdMps_{};
 };
 
 } // namespace marble::gameplay

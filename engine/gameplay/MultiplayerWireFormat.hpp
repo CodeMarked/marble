@@ -162,12 +162,14 @@ inline constexpr std::size_t kTierHandoffWireBytes = 56u;
 }
 
 /// Small unreliable state snapshot: simulation-local pose + velocity ([ADR-0060] narrow state).
+/// Bytes 40–43 hold yaw about +Y (radians); historically padding on the wire, now defined.
 struct EntityKinematicsSnapshot {
     std::uint32_t simTick{};
     WorldObjectRef entity{};
     PhysicsSimulationTier tier{PhysicsSimulationTier::Contact};
     math::Vec3 positionLocal{};
     math::Vec3 linearVelocity{};
+    float yawRadians{};
 };
 
 inline constexpr std::size_t kEntityKinematicsSnapshotWireBytes = 44u;
@@ -190,6 +192,7 @@ inline constexpr std::size_t kEntityKinematicsSnapshotWireBytes = 44u;
     writeF32Le(out + 28u, s.linearVelocity.x);
     writeF32Le(out + 32u, s.linearVelocity.y);
     writeF32Le(out + 36u, s.linearVelocity.z);
+    writeF32Le(out + 40u, s.yawRadians);
     return kEntityKinematicsSnapshotWireBytes;
 }
 
@@ -210,23 +213,32 @@ inline constexpr std::size_t kEntityKinematicsSnapshotWireBytes = 44u;
     out.linearVelocity.x = readF32Le(in + 28u);
     out.linearVelocity.y = readF32Le(in + 32u);
     out.linearVelocity.z = readF32Le(in + 36u);
+    out.yawRadians = readF32Le(in + 40u);
     return true;
 }
 
 // ---------------------------------------------------------------------------
-// Client input payload: world-space wish direction + buttons + client tick
-// for future prediction support.  Wire: [clientTick:u32][moveX:f32][moveZ:f32][buttons:u8][pad:3] = 16 bytes
+// Client input payload: horizontal wish + buttons + client tick + last acked server sim tick + optional steer.
+// Wire v2: [clientTick:u32][serverTickAck:u32][moveX:f32][moveZ:f32][steer:f32][buttons:u8][pad:3] = 24 bytes
+// Legacy v1 (16 bytes): same fields with serverTickAck=0, steer=0.
+// Garden `garden_server`: `moveX`/`moveZ` are world XZ components of the camera-relative movement wish
+// (normalized on the client when non-zero); `steer` is unused (send 0). Other game modes may use `steer` for vehicles.
 // ---------------------------------------------------------------------------
 
 struct ClientInputWirePayload {
     std::uint32_t clientTick{};
+    /// Last authoritative snapshot `simTick` the client applied (reconciliation / lag context).
+    std::uint32_t serverTickAck{};
     float moveX{};
     float moveZ{};
+    /// Optional steer (-1..1); unused for Garden marbles; reserved for vehicle-style modes.
+    float steer{};
     std::uint8_t buttons{};
 };
 
 inline constexpr std::uint8_t kClientInputButton_Jump = 0x01u;
-inline constexpr std::size_t kClientInputWirePayloadBytes = 16u;
+inline constexpr std::size_t kClientInputWirePayloadBytes = 24u;
+inline constexpr std::size_t kClientInputWirePayloadLegacyBytes = 16u;
 
 [[nodiscard]] inline std::size_t writeClientInputPayload(
     std::uint8_t* out,
@@ -237,10 +249,12 @@ inline constexpr std::size_t kClientInputWirePayloadBytes = 16u;
         return 0u;
     }
     writeU32Le(out + 0u, p.clientTick);
-    writeF32Le(out + 4u, p.moveX);
-    writeF32Le(out + 8u, p.moveZ);
-    writeU8(out + 12u, p.buttons);
-    std::memset(out + 13u, 0, 3u);
+    writeU32Le(out + 4u, p.serverTickAck);
+    writeF32Le(out + 8u, p.moveX);
+    writeF32Le(out + 12u, p.moveZ);
+    writeF32Le(out + 16u, p.steer);
+    writeU8(out + 20u, p.buttons);
+    std::memset(out + 21u, 0, 3u);
     return kClientInputWirePayloadBytes;
 }
 
@@ -249,14 +263,28 @@ inline constexpr std::size_t kClientInputWirePayloadBytes = 16u;
     std::size_t len,
     ClientInputWirePayload& out
 ) noexcept {
-    if (in == nullptr || len < kClientInputWirePayloadBytes) {
+    if (in == nullptr) {
         return false;
     }
-    out.clientTick = readU32Le(in + 0u);
-    out.moveX = readF32Le(in + 4u);
-    out.moveZ = readF32Le(in + 8u);
-    out.buttons = readU8(in + 12u);
-    return true;
+    if (len >= kClientInputWirePayloadBytes) {
+        out.clientTick = readU32Le(in + 0u);
+        out.serverTickAck = readU32Le(in + 4u);
+        out.moveX = readF32Le(in + 8u);
+        out.moveZ = readF32Le(in + 12u);
+        out.steer = readF32Le(in + 16u);
+        out.buttons = readU8(in + 20u);
+        return true;
+    }
+    if (len >= kClientInputWirePayloadLegacyBytes) {
+        out.clientTick = readU32Le(in + 0u);
+        out.serverTickAck = 0u;
+        out.moveX = readF32Le(in + 4u);
+        out.moveZ = readF32Le(in + 8u);
+        out.steer = 0.f;
+        out.buttons = readU8(in + 12u);
+        return true;
+    }
+    return false;
 }
 
 } // namespace marble::gameplay

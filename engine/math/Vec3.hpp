@@ -59,6 +59,20 @@ constexpr Vec3 operator*(float s, Vec3 v) noexcept {
     return a * (1.f - t) + b * t;
 }
 
+/// Shortest-path linear interpolation on a circle (radians).
+[[nodiscard]] inline float lerpAngleRadians(float a, float b, float t) noexcept {
+    float d = b - a;
+    constexpr float kPi = 3.14159265f;
+    constexpr float kTwoPi = 6.2831853f;
+    while (d > kPi) {
+        d -= kTwoPi;
+    }
+    while (d < -kPi) {
+        d += kTwoPi;
+    }
+    return a + d * t;
+}
+
 /// Same storage as `Vec3`; points are absolute, direction vectors relative (book §5.2.3).
 using Point3 = Vec3;
 

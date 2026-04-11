@@ -55,6 +55,12 @@ public:
     /// a session Hello envelope. Optional explicit call before a batch of `receive`; `receive` pumps as well.
     void pumpIngress() noexcept;
 
+    /// First auto-assigned joiner id when an unknown host sends Hello (default **2**). Listen hosts that reserve
+    /// peer **2** for synthetic local input should set this to **3** after [`bind`].
+    void setMinimumJoinerPeerId(PeerId id) noexcept;
+
+    [[nodiscard]] PeerId minimumJoinerPeerId() const noexcept { return minJoinerPeerId_; }
+
     [[nodiscard]] std::uint16_t localPort() const noexcept { return socket_.localPort(); }
 
     [[nodiscard]] bool isBound() const noexcept { return bound_; }
@@ -91,6 +97,8 @@ private:
     std::size_t ingressHead_{};
     std::size_t ingressCount_{};
     bool bound_{};
+    /// Reset to **2** on each successful [`bind`].
+    PeerId minJoinerPeerId_{2u};
 };
 
 } // namespace marble::gameplay

@@ -5,8 +5,10 @@
 #include "gameplay/ReliableChannel.hpp"
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 
 namespace marble::gameplay {
 
@@ -22,6 +24,10 @@ public:
     static constexpr std::uint32_t kHelloRetryTicks = 30;
     static constexpr std::uint32_t kRttEstimateTicks = 6;
     static constexpr std::size_t kMaxSnapshotPayload = 1024;
+    /// Simulated ticks between post-connect [`SessionMessageType::TimePing`] sends (protocol v4).
+    static constexpr std::uint32_t kTimePingIntervalTicks = 30u;
+    /// Drop outstanding ping if no [`SessionMessageType::TimePong`] by this many client sim ticks.
+    static constexpr std::uint32_t kTimePingTimeoutTicks = 120u;
 
     struct SnapshotEntry {
         std::uint32_t receiveTick{};
@@ -34,7 +40,8 @@ public:
         IGameTransport* transport,
         PeerId serverPeerId,
         std::uint16_t tickHz = 60u,
-        std::uint32_t clientNonce = 0xdeadbeefu
+        std::uint32_t clientNonce = 0xdeadbeefu,
+        std::uint32_t joinTokenU32 = 0u
     ) noexcept {
         if (transport == nullptr || serverPeerId == kInvalidPeerId) {
             return false;
@@ -43,6 +50,7 @@ public:
         serverPeerId_ = serverPeerId;
         tickHz_ = tickHz > 0u ? tickHz : 60u;
         clientNonce_ = clientNonce;
+        helloJoinTokenU32_ = joinTokenU32;
         state_ = ConnectionState::Disconnected;
         assignedPeerId_ = kInvalidPeerId;
         simTick_ = 0u;
@@ -54,6 +62,11 @@ public:
         for (auto& s : snapshotRing_) {
             s = {};
         }
+        resetServerTimeSync_();
+        outstandingPingId_ = 0u;
+        ticksSinceLastPing_ = 0u;
+        pingSendCounter_ = 1u;
+        pendingCorrection_.reset();
         initialized_ = true;
         return true;
     }
@@ -80,6 +93,8 @@ public:
             }
 
             processTransport();
+
+            maybeAdvanceTimePing_();
         }
     }
 
@@ -124,6 +139,39 @@ public:
         return count;
     }
 
+    /// Refine server tick mapping when an authoritative snapshot arrives ([ADR-0060] presentation timeline).
+    void noteAuthoritativeSnapshot(std::uint32_t serverSimTick) noexcept {
+        lastSyncServerSimTick_ = serverSimTick;
+        lastSyncClientSteady_ = std::chrono::steady_clock::now();
+        hasServerTimeSync_ = true;
+    }
+
+    [[nodiscard]] bool hasServerTimeSync() const noexcept { return hasServerTimeSync_; }
+
+    /// Exponential moving average of RTT (seconds): Hello→HelloAck, then refined by TimePing→TimePong.
+    /// Zero if not yet measured.
+    [[nodiscard]] float estimatedRttSeconds() const noexcept { return rttEmaSeconds_; }
+
+    /// Reliable [`SessionMessageType::StateCorrection`] from server (optional vertical-slice hook).
+    [[nodiscard]] bool takePendingStateCorrection(SessionStateCorrectionPayload& out) noexcept {
+        if (!pendingCorrection_.has_value()) {
+            return false;
+        }
+        out = *pendingCorrection_;
+        pendingCorrection_.reset();
+        return true;
+    }
+
+    /// Estimated server `simTick` at `steady_clock::now()` from last sync + `simulationHz`.
+    [[nodiscard]] float estimatedServerSimTickAtNow(float simulationHz) const noexcept {
+        if (!hasServerTimeSync_ || simulationHz <= 0.f) {
+            return 0.f;
+        }
+        auto const now = std::chrono::steady_clock::now();
+        float const sec = std::chrono::duration<float>(now - lastSyncClientSteady_).count();
+        return static_cast<float>(lastSyncServerSimTick_) + sec * simulationHz;
+    }
+
     void disconnect() noexcept {
         if (state_ != ConnectionState::Connected || transport_ == nullptr) {
             return;
@@ -139,16 +187,93 @@ public:
             static_cast<void>(transport_->send(serverPeerId_, buf.data(), len));
         }
         state_ = ConnectionState::Disconnected;
+        pendingCorrection_.reset();
+        resetServerTimeSync_();
     }
 
 private:
+    void resetServerTimeSync_() noexcept {
+        hasServerTimeSync_ = false;
+        lastSyncServerSimTick_ = 0u;
+        lastSyncClientSteady_ = {};
+        helloSendSteadyValid_ = false;
+        rttEmaSeconds_ = 0.f;
+        hasRttEstimate_ = false;
+        outstandingPingId_ = 0u;
+        ticksSinceLastPing_ = 0u;
+        pingSendCounter_ = 1u;
+    }
+
+    void applyRttSample_(float rttSec) noexcept {
+        if (rttSec < 0.f) {
+            return;
+        }
+        if (hasRttEstimate_) {
+            rttEmaSeconds_ = rttEmaSeconds_ * 0.875f + rttSec * 0.125f;
+        } else {
+            rttEmaSeconds_ = rttSec;
+            hasRttEstimate_ = true;
+        }
+    }
+
+    void maybeAdvanceTimePing_() noexcept {
+        if (state_ != ConnectionState::Connected || transport_ == nullptr) {
+            return;
+        }
+        if (outstandingPingId_ != 0u) {
+            if (simTick_ - pingSendSimTick_ >= kTimePingTimeoutTicks) {
+                outstandingPingId_ = 0u;
+            } else {
+                return;
+            }
+        }
+        ++ticksSinceLastPing_;
+        if (ticksSinceLastPing_ >= kTimePingIntervalTicks) {
+            sendTimePing_();
+            ticksSinceLastPing_ = 0u;
+        }
+    }
+
+    void sendTimePing_() noexcept {
+        std::uint32_t const id = pingSendCounter_;
+        ++pingSendCounter_;
+        if (pingSendCounter_ == 0u) {
+            pingSendCounter_ = 1u;
+        }
+        if (id == 0u) {
+            return;
+        }
+        SessionTimePingPayload ping{};
+        ping.clientPingId = id;
+
+        std::uint16_t const seq = channel_.nextSequence();
+        std::array<std::uint8_t, kMaxMessageBytes> buf{};
+        std::size_t const len = writeSessionTimePingReliable(
+            buf.data(), buf.size(), ping,
+            seq, channel_.ackSequence(), channel_.ackBitmap()
+        );
+        if (len == 0u) {
+            return;
+        }
+        if (!channel_.recordOutgoing(seq, buf.data(), len, simTick_)) {
+            return;
+        }
+        static_cast<void>(transport_->send(serverPeerId_, buf.data(), len));
+        outstandingPingId_ = id;
+        pingSendSteady_ = std::chrono::steady_clock::now();
+        pingSendSimTick_ = simTick_;
+    }
+
     void sendHello() noexcept {
         SessionHelloPayload hello{};
         hello.clientUdpPortHost = 0u;
         hello.clientNonce = clientNonce_;
+        hello.joinTokenU32 = helloJoinTokenU32_;
         std::array<std::uint8_t, 64> buf{};
         std::size_t const len = writeSessionHello(buf.data(), buf.size(), hello);
         if (len > 0u) {
+            helloSendSteady_ = std::chrono::steady_clock::now();
+            helloSendSteadyValid_ = true;
             static_cast<void>(transport_->send(serverPeerId_, buf.data(), len));
         }
     }
@@ -200,6 +325,14 @@ private:
                     break;
                 }
                 assignedPeerId_ = ack.assignedPeerId;
+                auto const ackRecvTime = std::chrono::steady_clock::now();
+                if (helloSendSteadyValid_) {
+                    float const rtt = std::chrono::duration<float>(ackRecvTime - helloSendSteady_).count();
+                    applyRttSample_(rtt);
+                }
+                lastSyncServerSimTick_ = ack.serverSimTickAtAck;
+                lastSyncClientSteady_ = ackRecvTime;
+                hasServerTimeSync_ = true;
                 state_ = ConnectionState::Connected;
                 break;
             }
@@ -208,12 +341,45 @@ private:
                     storeSnapshot(payload, payloadLen);
                 }
                 break;
+            case SessionMessageType::TimePong: {
+                if (state_ != ConnectionState::Connected) {
+                    break;
+                }
+                SessionTimePongPayload pong{};
+                if (!readSessionTimePong(payload, payloadLen, pong)) {
+                    break;
+                }
+                if (outstandingPingId_ == 0u || pong.clientPingId != outstandingPingId_) {
+                    break;
+                }
+                auto const recvTime = std::chrono::steady_clock::now();
+                float const rtt = std::chrono::duration<float>(recvTime - pingSendSteady_).count();
+                applyRttSample_(rtt);
+                lastSyncServerSimTick_ = pong.serverSimTick;
+                lastSyncClientSteady_ = recvTime;
+                hasServerTimeSync_ = true;
+                outstandingPingId_ = 0u;
+                break;
+            }
             case SessionMessageType::Ack:
                 break;
             case SessionMessageType::Disconnect:
                 state_ = ConnectionState::Disconnected;
+                resetServerTimeSync_();
                 break;
             case SessionMessageType::Hello:
+                break;
+            case SessionMessageType::ClientInput:
+                break;
+            case SessionMessageType::TimePing:
+                break;
+            case SessionMessageType::StateCorrection:
+                if (state_ == ConnectionState::Connected && (flags & kSessionEnvelopeFlag_Reliable) != 0) {
+                    SessionStateCorrectionPayload corr{};
+                    if (readSessionStateCorrection(payload, payloadLen, corr)) {
+                        pendingCorrection_ = corr;
+                    }
+                }
                 break;
             }
 
@@ -255,6 +421,7 @@ private:
     PeerId assignedPeerId_{kInvalidPeerId};
     std::uint16_t tickHz_{60u};
     std::uint32_t clientNonce_{};
+    std::uint32_t helloJoinTokenU32_{};
     ConnectionState state_{ConnectionState::Disconnected};
     bool initialized_{};
 
@@ -266,6 +433,22 @@ private:
     std::array<SnapshotEntry, SnapshotRingCapacity> snapshotRing_{};
     std::size_t snapshotHead_{};
     std::size_t snapshotCount_{};
+
+    std::chrono::steady_clock::time_point lastSyncClientSteady_{};
+    std::chrono::steady_clock::time_point helloSendSteady_{};
+    std::uint32_t lastSyncServerSimTick_{};
+    float rttEmaSeconds_{};
+    bool hasServerTimeSync_{};
+    bool helloSendSteadyValid_{};
+    bool hasRttEstimate_{};
+
+    std::uint32_t outstandingPingId_{};
+    std::uint32_t ticksSinceLastPing_{};
+    std::uint32_t pingSendCounter_{1u};
+    std::uint32_t pingSendSimTick_{};
+    std::chrono::steady_clock::time_point pingSendSteady_{};
+
+    std::optional<SessionStateCorrectionPayload> pendingCorrection_{};
 };
 
 } // namespace marble::gameplay

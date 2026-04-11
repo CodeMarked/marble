@@ -459,7 +459,8 @@ public:
                 }
                 math::Vec3 c = fromRVec3(iface.GetCenterOfMassPosition(j));
                 applyCylindricalClampToCenter(c, clamp);
-                iface.SetPositionAndRotationWhenChanged(j, toRVec3(c), Quat::sIdentity(), EActivation::Activate);
+                Quat const q = iface.GetRotation(j);
+                iface.SetPositionAndRotationWhenChanged(j, toRVec3(c), q, EActivation::Activate);
                 iface.SetLinearVelocity(j, iface.GetLinearVelocity(j));
             }
         }
@@ -525,6 +526,17 @@ public:
         RMat44 const rjm = iface.GetCenterOfMassTransform(j);
         Mat44 const jm = rjm.ToMat44();
         return fromJoltMat44(jm);
+    }
+
+    void setBodyYawAboutY(PhysicsBodyId id, float yawRadians) noexcept override {
+        BodyID const j = joltId(id);
+        if (j.IsInvalid()) {
+            return;
+        }
+        BodyInterface& iface = impl_->physics_system.GetBodyInterface();
+        RVec3 const p = iface.GetCenterOfMassPosition(j);
+        Quat const q = Quat::sRotation(Vec3::sAxisY(), yawRadians);
+        iface.SetPositionAndRotationWhenChanged(j, p, q, EActivation::Activate);
     }
 
 private:

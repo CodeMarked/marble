@@ -4,6 +4,7 @@
 #include "gameplay/WorldDataFormats.hpp"
 #include "math/Vec3.hpp"
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 
@@ -14,6 +15,7 @@ struct ReplicatedEntity {
     WorldObjectRef entity{};
     math::Vec3 position{};
     math::Vec3 velocity{};
+    float yawRadians{};
     PhysicsSimulationTier tier{PhysicsSimulationTier::Contact};
     bool active{};
 };
@@ -57,6 +59,48 @@ template <std::size_t MaxEntities>
         }
     }
     return written;
+}
+
+/// View pose for relevance scoring (velocity biases entities ahead of travel).
+struct InterestViewContext {
+    math::Vec3 position{};
+    math::Vec3 velocity{};
+};
+
+/// Lower scores are replicated first (distance + frontal bias + mild speed preference).
+[[nodiscard]] inline float interestScoreLowerIsBetter(
+    ReplicatedEntity const& e,
+    InterestViewContext const& view
+) noexcept {
+    math::Vec3 const d = e.position - view.position;
+    float const dist2 = math::lengthSquared(d);
+    float score = dist2;
+    float const vs2 = math::lengthSquared(view.velocity);
+    if (vs2 > 0.04f) {
+        float const invV = 1.f / std::sqrt(vs2);
+        math::Vec3 const vn = view.velocity * invV;
+        float const dist = std::sqrt(std::max(dist2, 1e-8f));
+        math::Vec3 const en = d * (1.f / dist);
+        float const frontal = math::dot(vn, en);
+        float const penal = 1.f + std::max(0.f, -frontal) * 2.2f;
+        score *= penal;
+    }
+    float const es = math::length(e.velocity);
+    score /= 1.f + es * 0.0025f;
+    return score;
+}
+
+[[nodiscard]] inline std::uint32_t quantizedKinematicsFingerprint(
+    ReplicatedEntity const& e
+) noexcept {
+    auto q = [](float x) noexcept -> std::uint32_t {
+        return static_cast<std::uint32_t>(std::lround(x * 48.f)) * 0x9e3779b1u;
+    };
+    std::uint32_t h = 2166136261u;
+    h ^= q(e.position.x) ^ q(e.position.y) ^ q(e.position.z);
+    h ^= q(e.velocity.x) ^ q(e.velocity.y) ^ q(e.velocity.z);
+    h ^= q(e.yawRadians);
+    return h;
 }
 
 /// Per-peer AOI state stored alongside session peer data.

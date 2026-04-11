@@ -48,6 +48,10 @@ struct SessionConfig {
     std::uint16_t simulationHz{60u};
     std::uint16_t snapshotHz{20u};
     std::uint16_t maxPredictionTicks{2u};
+    /// When non-zero, [`SessionHelloPayload::joinTokenU32`] must match or the server ignores the hello.
+    std::uint32_t joinTokenU32{0u};
+    /// Max unreliable snapshot bytes per connected peer per emit (0 = unlimited).
+    std::uint32_t maxSnapshotBytesPerPeer{1400u};
 };
 
 [[nodiscard]] constexpr bool isValid(SessionConfig const& c) noexcept {
@@ -55,6 +59,9 @@ struct SessionConfig {
         return false;
     }
     if (c.snapshotHz > c.simulationHz) {
+        return false;
+    }
+    if (c.simulationHz % c.snapshotHz != 0u) {
         return false;
     }
     if (c.mode == MultiplayerMode::Offline) {

@@ -2,6 +2,7 @@
 
 #include "gameplay/MultiplayerWireFormat.hpp"
 #include "gameplay/OnlineMultiplayerFoundation.hpp"
+#include "math/Vec3.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -14,7 +15,7 @@ namespace marble::gameplay {
 inline constexpr std::uint32_t kMarbleSessionMagicLe = 0x3142524du;
 
 /// Bump when envelope or message layouts change; peers must match exactly.
-inline constexpr std::uint16_t kMarbleSessionProtocolVersion = 2u;
+inline constexpr std::uint16_t kMarbleSessionProtocolVersion = 5u;
 
 inline constexpr std::size_t kSessionEnvelopeBytes = 8u;
 
@@ -30,23 +31,58 @@ enum class SessionMessageType : std::uint8_t {
     GameSnapshot = 3,
     Ack = 4,
     Disconnect = 5,
-    ClientInput = 6
+    ClientInput = 6,
+    /// Reliable: client→server time sync probe (protocol v4; see ADR-0062 in repo `docs/decisions/`).
+    TimePing = 7,
+    /// Reliable: server→client response with `serverSimTick` (protocol v4+).
+    TimePong = 8,
+    /// Reliable: authoritative kinematics correction for a single entity (protocol v5+).
+    StateCorrection = 9
 };
 
 struct SessionHelloPayload {
     std::uint16_t clientUdpPortHost{};
     std::uint32_t clientNonce{};
+    /// Must match [`SessionConfig::joinTokenU32`] when that config value is non-zero.
+    std::uint32_t joinTokenU32{};
 };
 
-inline constexpr std::size_t kSessionHelloPayloadBytes = 6u;
+inline constexpr std::size_t kSessionHelloPayloadBytes = 10u;
+inline constexpr std::size_t kSessionHelloPayloadLegacyBytes = 6u;
 
 struct SessionHelloAckPayload {
     PeerId assignedPeerId{kInvalidPeerId};
     std::uint16_t reserved{};
+    /// Server [`AuthoritativeSession::currentTick`] at ack send (protocol v3+).
+    std::uint32_t serverSimTickAtAck{};
     std::uint32_t echoClientNonce{};
 };
 
-inline constexpr std::size_t kSessionHelloAckPayloadBytes = 8u;
+inline constexpr std::size_t kSessionHelloAckPayloadBytes = 12u;
+
+struct SessionTimePingPayload {
+    /// Client-chosen id; echoed in [`SessionTimePongPayload`] to match replies (non-zero recommended).
+    std::uint32_t clientPingId{};
+};
+
+inline constexpr std::size_t kSessionTimePingPayloadBytes = 4u;
+
+struct SessionTimePongPayload {
+    std::uint32_t clientPingId{};
+    std::uint32_t serverSimTick{};
+};
+
+inline constexpr std::size_t kSessionTimePongPayloadBytes = 8u;
+
+struct SessionStateCorrectionPayload {
+    std::uint32_t serverSimTick{};
+    WorldObjectRef entity{};
+    math::Vec3 positionLocal{};
+    math::Vec3 linearVelocity{};
+    float yawRadians{};
+};
+
+inline constexpr std::size_t kSessionStateCorrectionPayloadBytes = 40u;
 
 // ---------------------------------------------------------------------------
 // Unreliable envelope (flags byte = 0, no reliable header)
@@ -176,6 +212,7 @@ inline constexpr std::size_t kSessionHelloAckPayloadBytes = 8u;
     std::array<std::uint8_t, kSessionHelloPayloadBytes> pl{};
     writeU16Le(pl.data(), p.clientUdpPortHost);
     writeU32Le(pl.data() + 2u, p.clientNonce);
+    writeU32Le(pl.data() + 6u, p.joinTokenU32);
     return writeSessionEnvelope(out, cap, SessionMessageType::Hello, pl.data(), pl.size());
 }
 
@@ -184,11 +221,15 @@ inline constexpr std::size_t kSessionHelloAckPayloadBytes = 8u;
     std::size_t payloadLen,
     SessionHelloPayload& out
 ) noexcept {
-    if (payload == nullptr || payloadLen < kSessionHelloPayloadBytes) {
+    if (payload == nullptr || payloadLen < kSessionHelloPayloadLegacyBytes) {
         return false;
     }
     out.clientUdpPortHost = readU16Le(payload + 0u);
     out.clientNonce = readU32Le(payload + 2u);
+    out.joinTokenU32 = 0u;
+    if (payloadLen >= kSessionHelloPayloadBytes) {
+        out.joinTokenU32 = readU32Le(payload + 6u);
+    }
     return true;
 }
 
@@ -201,7 +242,8 @@ inline constexpr std::size_t kSessionHelloAckPayloadBytes = 8u;
     std::array<std::uint8_t, kSessionHelloAckPayloadBytes> pl{};
     writeU16Le(pl.data(), p.assignedPeerId);
     writeU16Le(pl.data() + 2u, p.reserved);
-    writeU32Le(pl.data() + 4u, p.echoClientNonce);
+    writeU32Le(pl.data() + 4u, p.serverSimTickAtAck);
+    writeU32Le(pl.data() + 8u, p.echoClientNonce);
     return writeSessionEnvelope(out, cap, SessionMessageType::HelloAck, pl.data(), pl.size());
 }
 
@@ -217,7 +259,8 @@ inline constexpr std::size_t kSessionHelloAckPayloadBytes = 8u;
     std::array<std::uint8_t, kSessionHelloAckPayloadBytes> pl{};
     writeU16Le(pl.data(), p.assignedPeerId);
     writeU16Le(pl.data() + 2u, p.reserved);
-    writeU32Le(pl.data() + 4u, p.echoClientNonce);
+    writeU32Le(pl.data() + 4u, p.serverSimTickAtAck);
+    writeU32Le(pl.data() + 8u, p.echoClientNonce);
     return writeSessionEnvelopeReliable(out, cap, SessionMessageType::HelloAck,
                                         seq, ackSeq, ackBits, pl.data(), pl.size());
 }
@@ -232,7 +275,8 @@ inline constexpr std::size_t kSessionHelloAckPayloadBytes = 8u;
     }
     out.assignedPeerId = readU16Le(payload + 0u);
     out.reserved = readU16Le(payload + 2u);
-    out.echoClientNonce = readU32Le(payload + 4u);
+    out.serverSimTickAtAck = readU32Le(payload + 4u);
+    out.echoClientNonce = readU32Le(payload + 8u);
     return true;
 }
 
@@ -295,6 +339,102 @@ inline constexpr std::size_t kSessionHelloAckPayloadBytes = 8u;
     std::size_t inputPayloadBytes
 ) noexcept {
     return writeSessionEnvelope(out, cap, SessionMessageType::ClientInput, inputPayload, inputPayloadBytes);
+}
+
+[[nodiscard]] inline std::size_t writeSessionTimePingReliable(
+    std::uint8_t* out,
+    std::size_t cap,
+    SessionTimePingPayload const& p,
+    std::uint16_t seq,
+    std::uint16_t ackSeq,
+    std::uint32_t ackBits
+) noexcept {
+    std::array<std::uint8_t, kSessionTimePingPayloadBytes> pl{};
+    writeU32Le(pl.data(), p.clientPingId);
+    return writeSessionEnvelopeReliable(out, cap, SessionMessageType::TimePing,
+                                        seq, ackSeq, ackBits, pl.data(), pl.size());
+}
+
+[[nodiscard]] inline bool readSessionTimePing(
+    std::uint8_t const* payload,
+    std::size_t payloadLen,
+    SessionTimePingPayload& out
+) noexcept {
+    if (payload == nullptr || payloadLen < kSessionTimePingPayloadBytes) {
+        return false;
+    }
+    out.clientPingId = readU32Le(payload);
+    return true;
+}
+
+[[nodiscard]] inline std::size_t writeSessionTimePongReliable(
+    std::uint8_t* out,
+    std::size_t cap,
+    SessionTimePongPayload const& p,
+    std::uint16_t seq,
+    std::uint16_t ackSeq,
+    std::uint32_t ackBits
+) noexcept {
+    std::array<std::uint8_t, kSessionTimePongPayloadBytes> pl{};
+    writeU32Le(pl.data(), p.clientPingId);
+    writeU32Le(pl.data() + 4u, p.serverSimTick);
+    return writeSessionEnvelopeReliable(out, cap, SessionMessageType::TimePong,
+                                        seq, ackSeq, ackBits, pl.data(), pl.size());
+}
+
+[[nodiscard]] inline bool readSessionTimePong(
+    std::uint8_t const* payload,
+    std::size_t payloadLen,
+    SessionTimePongPayload& out
+) noexcept {
+    if (payload == nullptr || payloadLen < kSessionTimePongPayloadBytes) {
+        return false;
+    }
+    out.clientPingId = readU32Le(payload);
+    out.serverSimTick = readU32Le(payload + 4u);
+    return true;
+}
+
+[[nodiscard]] inline std::size_t writeSessionStateCorrectionReliable(
+    std::uint8_t* out,
+    std::size_t cap,
+    SessionStateCorrectionPayload const& p,
+    std::uint16_t seq,
+    std::uint16_t ackSeq,
+    std::uint32_t ackBits
+) noexcept {
+    std::array<std::uint8_t, kSessionStateCorrectionPayloadBytes> pl{};
+    writeU32Le(pl.data() + 0u, p.serverSimTick);
+    writeU64Le(pl.data() + 4u, p.entity.guid);
+    writeF32Le(pl.data() + 12u, p.positionLocal.x);
+    writeF32Le(pl.data() + 16u, p.positionLocal.y);
+    writeF32Le(pl.data() + 20u, p.positionLocal.z);
+    writeF32Le(pl.data() + 24u, p.linearVelocity.x);
+    writeF32Le(pl.data() + 28u, p.linearVelocity.y);
+    writeF32Le(pl.data() + 32u, p.linearVelocity.z);
+    writeF32Le(pl.data() + 36u, p.yawRadians);
+    return writeSessionEnvelopeReliable(out, cap, SessionMessageType::StateCorrection,
+                                        seq, ackSeq, ackBits, pl.data(), pl.size());
+}
+
+[[nodiscard]] inline bool readSessionStateCorrection(
+    std::uint8_t const* payload,
+    std::size_t payloadLen,
+    SessionStateCorrectionPayload& out
+) noexcept {
+    if (payload == nullptr || payloadLen < kSessionStateCorrectionPayloadBytes) {
+        return false;
+    }
+    out.serverSimTick = readU32Le(payload + 0u);
+    out.entity.guid = readU64Le(payload + 4u);
+    out.positionLocal.x = readF32Le(payload + 12u);
+    out.positionLocal.y = readF32Le(payload + 16u);
+    out.positionLocal.z = readF32Le(payload + 20u);
+    out.linearVelocity.x = readF32Le(payload + 24u);
+    out.linearVelocity.y = readF32Le(payload + 28u);
+    out.linearVelocity.z = readF32Le(payload + 32u);
+    out.yawRadians = readF32Le(payload + 36u);
+    return true;
 }
 
 } // namespace marble::gameplay

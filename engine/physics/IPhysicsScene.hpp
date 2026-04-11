@@ -63,6 +63,9 @@ public:
 
     /// COM pose for rendering: column-major translation + rotation (scale applied by caller). Invalid `id` → identity.
     [[nodiscard]] virtual math::Mat4 bodyWorldMatrix(PhysicsBodyId id) const = 0;
+
+    /// Set world yaw (+Y axis, radians) while preserving current center of mass. Invalid `id` is a no-op.
+    virtual void setBodyYawAboutY(PhysicsBodyId id, float yawRadians) noexcept = 0;
 };
 
 /// Builds a Jolt-backed scene ([`ADR-0058`](../../docs/decisions/ADR-0058-physics-middleware-integration.md)).
