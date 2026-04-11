@@ -1,6 +1,7 @@
 // Smoke test: verifies the garden server's physics + session loop produces valid snapshots
 // via loopback transport (no real UDP needed).
 
+#include "garden/GardenMarblePlayer.hpp"
 #include "garden/GardenSimulation.hpp"
 #include "gameplay/AuthoritativeSession.hpp"
 #include "gameplay/ClientSession.hpp"
@@ -118,12 +119,15 @@ static void gardenServerStyleFixedStep(
     IGameTransport& clientToServerTransport,
     PeerId serverPeer,
     IPhysicsScene& physicsScene,
+    marble::garden::GardenLayout const& layout,
     std::span<RigidBodyKinematics> marbles,
     std::span<PhysicsBodyId const> bodyIds,
     PhysicsWorldSettings const& worldSettings,
     float kDt,
     bool enqueueMoveX,
-    std::uint32_t& clientInputSeq
+    std::uint32_t& clientInputSeq,
+    bool& jumpWasHeld,
+    float& jumpChargeSec
 ) {
     if (enqueueMoveX) {
         ClientInputWirePayload ci{};
@@ -144,32 +148,25 @@ static void gardenServerStyleFixedStep(
     constexpr PeerId kFirstClientPeer = 2u;
     auto const* inp = server.latestInput(kFirstClientPeer);
     if (inp != nullptr) {
-        constexpr float kMarbleRoll = 4.6f;
-        constexpr float kMaxHoriz = 5.2f;
-        float const mx = inp->moveX;
-        float const mz = inp->moveZ;
-        float const mag = std::sqrt(mx * mx + mz * mz);
-        if (mag > 1e-5f && marbles[0].invMass > 0.f) {
-            float const nx = mx / mag;
-            float const nz = mz / mag;
-            Vec3 const wish{nx, 0.f, nz};
-            applyImpulseLinear(marbles[0], wish * (kMarbleRoll * kDt));
-            float const vx = marbles[0].linearVelocity.x;
-            float const vz = marbles[0].linearVelocity.z;
-            float const vh = std::sqrt(vx * vx + vz * vz);
-            if (vh > kMaxHoriz && vh > 1e-6f) {
-                float const s = kMaxHoriz / vh;
-                marbles[0].linearVelocity.x *= s;
-                marbles[0].linearVelocity.z *= s;
-            }
-        }
+        bool const jumpHeld = (inp->buttons & kClientInputButton_Jump) != 0;
+        marble::garden::applyGardenMarblePlayerStep(
+            marbles[0],
+            layout,
+            inp->moveX,
+            inp->moveZ,
+            jumpHeld,
+            jumpWasHeld,
+            jumpChargeSec,
+            kDt,
+            marble::garden::kMarbleRadius);
         server.clearInput(kFirstClientPeer);
     }
 
     physicsScene.syncHostVelocitiesBeforeStep(bodyIds, marbles.data(), marbles.size());
 
     PhysicsCylindricalXZClamp clamp{};
-    clamp.maxHorizontalRadiusFromYAxis = marble::garden::kGardenRadius;
+    clamp.maxHorizontalRadiusFromYAxis =
+        marble::garden::kGardenRadius - marble::garden::kMarbleRadius - 0.02f;
     clamp.minCenterY = -5.f;
     PhysicsStepOptions stepOpts{};
     stepOpts.postStepCylindricalClamp = &clamp;
@@ -257,6 +254,8 @@ static void testClientInputDrivesAuthoritativeMarbleAndSnapshots() {
 
     constexpr float kDt = 1.f / 60.f;
     std::uint32_t clientInputSeq = 0u;
+    bool jumpWasHeld = false;
+    float jumpChargeSec = 0.f;
 
     for (int t = 0; t < 300 && client.state() != ConnectionState::Connected; ++t) {
         std::span<RigidBodyKinematics> marbleSpan(marbles.data(), kMarbleCount);
@@ -267,12 +266,15 @@ static void testClientInputDrivesAuthoritativeMarbleAndSnapshots() {
             transport.b,
             kServerId,
             *physicsScene,
+            layout,
             marbleSpan,
             bodySpan,
             worldSettings,
             kDt,
             false,
-            clientInputSeq
+            clientInputSeq,
+            jumpWasHeld,
+            jumpChargeSec
         );
     }
     assert(client.state() == ConnectionState::Connected);
@@ -286,12 +288,15 @@ static void testClientInputDrivesAuthoritativeMarbleAndSnapshots() {
             transport.b,
             kServerId,
             *physicsScene,
+            layout,
             marbleSpan,
             bodySpan,
             worldSettings,
             kDt,
             false,
-            clientInputSeq
+            clientInputSeq,
+            jumpWasHeld,
+            jumpChargeSec
         );
     }
 
@@ -306,12 +311,15 @@ static void testClientInputDrivesAuthoritativeMarbleAndSnapshots() {
             transport.b,
             kServerId,
             *physicsScene,
+            layout,
             marbleSpan,
             bodySpan,
             worldSettings,
             kDt,
             true,
-            clientInputSeq
+            clientInputSeq,
+            jumpWasHeld,
+            jumpChargeSec
         );
     }
 
@@ -431,6 +439,125 @@ static void testServerWithInterpolation() {
         result[0].extrapolated ? 1 : 0);
 }
 
+/// Mirrors `garden_server` when `--aoi-radius` is tight: per-tick `setPeerViewEntity(client, 0)` and only nearby
+/// marbles replicate (dedicated path uses the same `AuthoritativeSession` AOI hooks).
+static void testGardenStyleAoiFiltersDistantMarble() {
+    marble::garden::GardenLayout layout{};
+    marble::garden::buildGardenLayout(99u, layout);
+
+    auto physicsScene = createJoltPhysicsScene();
+    SimulationIsland island{};
+
+    PhysicsStaticHeightFieldDesc hfDesc{};
+    hfDesc.offset = localGameplayToJolt(island, layout.terrain.origin);
+    hfDesc.scale = {layout.terrain.cellSize, 1.f, layout.terrain.cellSize};
+    hfDesc.sampleCount = layout.terrain.sampleCount;
+    hfDesc.heights = std::span<float const>(layout.terrain.heights.data(), layout.terrain.heights.size());
+    static_cast<void>(physicsScene->addStaticHeightField(hfDesc));
+
+    std::array<RigidBodyKinematics, 2> marbles{};
+    std::array<PhysicsBodyId, 2> bodyIds{};
+    marble::garden::placeMarblesInArena(marbles, layout);
+
+    for (std::size_t i = 0; i < 2; ++i) {
+        PhysicsDynamicSphereDesc desc{};
+        desc.center = localGameplayToJolt(island, marbles[i].position);
+        desc.radius = marble::garden::kMarbleRadius;
+        desc.invMass = 1.f / marble::garden::kPlayerBallMassKg;
+        bodyIds[i] = physicsScene->addDynamicSphere(desc);
+        assert(bodyIds[i] != kInvalidPhysicsBodyId);
+    }
+    physicsScene->optimizeBroadPhase();
+
+    float const y0 = marble::garden::gardenTerrainHeightAt(layout.terrain, 0.f, 0.f) + marble::garden::kMarbleRadius;
+    float const y1 =
+        marble::garden::gardenTerrainHeightAt(layout.terrain, 420.f, 0.f) + marble::garden::kMarbleRadius;
+    Vec3 const p0{0.f, y0, 0.f};
+    Vec3 const p1{420.f, y1, 0.f};
+    marbles[0].position = p0;
+    marbles[1].position = p1;
+    marbles[0].linearVelocity = {};
+    marbles[1].linearVelocity = {};
+    physicsScene->setBodyCenterAndLinearVelocity(bodyIds[0], localGameplayToJolt(island, p0), Vec3{});
+    physicsScene->setBodyCenterAndLinearVelocity(bodyIds[1], localGameplayToJolt(island, p1), Vec3{});
+
+    constexpr PeerId kServerId = 1u;
+    constexpr PeerId kClientId = 2u;
+    using Loopback = LoopbackTransportPair<2048, 64>;
+    Loopback transport(kServerId, kClientId);
+
+    AuthoritativeSession<> server{};
+    SessionConfig config{};
+    config.mode = MultiplayerMode::DedicatedServer;
+    config.maxPlayers = 2u;
+    config.simulationHz = 60u;
+    config.snapshotHz = 20u;
+    assert(server.initialize(config, &transport.a));
+
+    ClientSession<> client{};
+    assert(client.initialize(&transport.b, kServerId, 60u, 0xA01u));
+
+    server.setAoiEnabled(true);
+    server.setDefaultAoiRadius(100.f);
+
+    PhysicsWorldSettings worldSettings{};
+    worldSettings.gravity = {0.f, -9.81f, 0.f};
+    constexpr float kDt = 1.f / 60.f;
+
+    for (int tick = 0; tick < 400; ++tick) {
+        if (server.isConnected(kClientId)) {
+            server.setPeerViewEntity(kClientId, 0u);
+        }
+
+        std::span<PhysicsBodyId const> bodySpan(bodyIds.data(), 2);
+        physicsScene->syncHostVelocitiesBeforeStep(bodySpan, marbles.data(), 2);
+        physicsScene->step(kDt, worldSettings);
+        physicsScene->readBackKinematics(bodySpan, marbles.data(), 2);
+
+        for (std::size_t i = 0; i < 2; ++i) {
+            static_cast<void>(server.setEntity(
+                i,
+                WorldObjectRef{static_cast<std::uint64_t>(0x1000u + i)},
+                marbles[i].position,
+                marbles[i].linearVelocity
+            ));
+        }
+
+        server.tick(kDt);
+        client.tick(kDt);
+    }
+
+    assert(client.state() == ConnectionState::Connected);
+
+    std::array<EntityKinematicsSnapshot, 4> snaps{};
+    std::size_t const aoiCount = client.readLatestEntities(snaps.data(), snaps.size());
+    assert(aoiCount == 1u);
+    assert(snaps[0].entity.guid == 0x1000u);
+    std::printf("  AOI on: latest entity count=%zu (expect 1)\n", aoiCount);
+
+    server.setAoiEnabled(false);
+    for (int i = 0; i < 12; ++i) {
+        std::span<PhysicsBodyId const> bodySpan(bodyIds.data(), 2);
+        physicsScene->syncHostVelocitiesBeforeStep(bodySpan, marbles.data(), 2);
+        physicsScene->step(kDt, worldSettings);
+        physicsScene->readBackKinematics(bodySpan, marbles.data(), 2);
+        for (std::size_t e = 0; e < 2; ++e) {
+            static_cast<void>(server.setEntity(
+                e,
+                WorldObjectRef{static_cast<std::uint64_t>(0x1000u + e)},
+                marbles[e].position,
+                marbles[e].linearVelocity
+            ));
+        }
+        server.tick(kDt);
+        client.tick(kDt);
+    }
+
+    std::size_t const fullCount = client.readLatestEntities(snaps.data(), snaps.size());
+    assert(fullCount == 2u);
+    std::printf("  AOI off: latest entity count=%zu (expect 2)\n", fullCount);
+}
+
 int main() {
     std::printf("garden_server_smoke_test\n");
 
@@ -442,6 +569,9 @@ int main() {
 
     std::printf("testServerWithInterpolation:\n");
     testServerWithInterpolation();
+
+    std::printf("testGardenStyleAoiFiltersDistantMarble:\n");
+    testGardenStyleAoiFiltersDistantMarble();
 
     std::printf("All garden_server_smoke_test tests passed.\n");
     return 0;

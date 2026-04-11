@@ -10,10 +10,10 @@ using marble::math::Vec3;
 
 static void testFilterNearbyEntities() {
     ReplicatedEntity entities[4]{};
-    entities[0] = {WorldObjectRef{1}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, PhysicsSimulationTier::Contact, true};
-    entities[1] = {WorldObjectRef{2}, {10.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, PhysicsSimulationTier::Contact, true};
-    entities[2] = {WorldObjectRef{3}, {500.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, PhysicsSimulationTier::Contact, true};
-    entities[3] = {WorldObjectRef{4}, {1000.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, PhysicsSimulationTier::Contact, true};
+    entities[0] = {WorldObjectRef{1}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 0.f, PhysicsSimulationTier::Contact, true};
+    entities[1] = {WorldObjectRef{2}, {10.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 0.f, PhysicsSimulationTier::Contact, true};
+    entities[2] = {WorldObjectRef{3}, {500.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 0.f, PhysicsSimulationTier::Contact, true};
+    entities[3] = {WorldObjectRef{4}, {1000.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 0.f, PhysicsSimulationTier::Contact, true};
 
     InterestRegion region{};
     region.viewPosition = {0.f, 0.f, 0.f};
@@ -31,8 +31,8 @@ static void testFilterNearbyEntities() {
 
 static void testFilterExcludesInactive() {
     ReplicatedEntity entities[2]{};
-    entities[0] = {WorldObjectRef{1}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, PhysicsSimulationTier::Contact, true};
-    entities[1] = {WorldObjectRef{2}, {5.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, PhysicsSimulationTier::Contact, false};
+    entities[0] = {WorldObjectRef{1}, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 0.f, PhysicsSimulationTier::Contact, true};
+    entities[1] = {WorldObjectRef{2}, {5.f, 0.f, 0.f}, {0.f, 0.f, 0.f}, 0.f, PhysicsSimulationTier::Contact, false};
 
     InterestRegion region{};
     region.viewPosition = {0.f, 0.f, 0.f};
@@ -48,7 +48,7 @@ static void testFilterExcludesInactive() {
 
 static void testVelocityLookahead() {
     ReplicatedEntity entities[1]{};
-    entities[0] = {WorldObjectRef{1}, {150.f, 0.f, 0.f}, {200.f, 0.f, 0.f}, PhysicsSimulationTier::Contact, true};
+    entities[0] = {WorldObjectRef{1}, {150.f, 0.f, 0.f}, {200.f, 0.f, 0.f}, 0.f, PhysicsSimulationTier::Contact, true};
 
     InterestRegion region{};
     region.viewPosition = {0.f, 0.f, 0.f};
@@ -72,6 +72,7 @@ static void testMaxOutLimit() {
         entities[i] = {WorldObjectRef{static_cast<std::uint64_t>(i + 1)},
                        {static_cast<float>(i), 0.f, 0.f},
                        {0.f, 0.f, 0.f},
+                       0.f,
                        PhysicsSimulationTier::Contact,
                        true};
     }

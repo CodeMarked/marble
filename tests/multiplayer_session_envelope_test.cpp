@@ -10,6 +10,7 @@ int main() {
     SessionHelloPayload helloIn{};
     helloIn.clientUdpPortHost = 54321u;
     helloIn.clientNonce = 0x11223344u;
+    helloIn.joinTokenU32 = 0xdeadbeefu;
 
     std::array<std::uint8_t, 64> buf{};
     std::size_t const nHello = writeSessionHello(buf.data(), buf.size(), helloIn);
@@ -30,12 +31,14 @@ int main() {
     if (!readSessionHello(pl, plen, helloOut)) {
         return 4;
     }
-    if (helloOut.clientUdpPortHost != helloIn.clientUdpPortHost || helloOut.clientNonce != helloIn.clientNonce) {
+    if (helloOut.clientUdpPortHost != helloIn.clientUdpPortHost || helloOut.clientNonce != helloIn.clientNonce ||
+        helloOut.joinTokenU32 != helloIn.joinTokenU32) {
         return 5;
     }
 
     SessionHelloAckPayload ackIn{};
     ackIn.assignedPeerId = 7u;
+    ackIn.serverSimTickAtAck = 42u;
     ackIn.echoClientNonce = helloIn.clientNonce;
     std::size_t const nAck = writeSessionHelloAck(buf.data(), buf.size(), ackIn);
     if (nAck != kSessionEnvelopeBytes + kSessionHelloAckPayloadBytes) {
@@ -48,7 +51,8 @@ int main() {
     if (!readSessionHelloAck(pl, plen, ackOut)) {
         return 8;
     }
-    if (ackOut.assignedPeerId != 7u || ackOut.echoClientNonce != helloIn.clientNonce) {
+    if (ackOut.assignedPeerId != 7u || ackOut.serverSimTickAtAck != 42u ||
+        ackOut.echoClientNonce != helloIn.clientNonce) {
         return 9;
     }
 

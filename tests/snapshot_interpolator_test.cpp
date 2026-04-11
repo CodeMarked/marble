@@ -100,6 +100,15 @@ int main() {
         if (!approxEq(out[0].position.x, 2.f)) {
             return 24;
         }
+
+        // Fractional render tick: 12.5 => t = 2.5/6, pos.x = 2.5
+        n = interp.interpolate(12.5f, out, 4u);
+        if (n != 1u) {
+            return 25;
+        }
+        if (!approxEq(out[0].position.x, 2.5f)) {
+            return 26;
+        }
     }
 
     // --- exact tick match on older frame (t = 0) ---
@@ -693,6 +702,105 @@ int main() {
                     return 213;
                 }
             }
+        }
+    }
+
+    // --- velocity jump blend: large Δv uses newer velocity, position still lerped ---
+    {
+        SnapshotInterpolator<4, 8> interp{};
+        interp.setVelocityJumpBlendThresholdMps(8.f);
+
+        EntityKinematicsSnapshot s1{};
+        s1.simTick = 0u;
+        s1.entity = kEntA;
+        s1.positionLocal = {0.f, 0.f, 0.f};
+        s1.linearVelocity = {0.f, 0.f, 0.f};
+
+        EntityKinematicsSnapshot s2{};
+        s2.simTick = 10u;
+        s2.entity = kEntA;
+        s2.positionLocal = {10.f, 0.f, 0.f};
+        s2.linearVelocity = {10.f, 0.f, 0.f};
+
+        interp.pushSnapshot(0u, &s1, 1u);
+        interp.pushSnapshot(10u, &s2, 1u);
+
+        InterpolatedEntity out[4]{};
+        static_cast<void>(interp.interpolate(5u, out, 4u));
+        if (!approxEq(out[0].position.x, 5.f)) {
+            return 160;
+        }
+        if (!approxEq(out[0].velocity.x, 10.f)) {
+            return 161;
+        }
+        if (out[0].extrapolated) {
+            return 162;
+        }
+
+        interp.setVelocityJumpBlendThresholdMps(0.f);
+        static_cast<void>(interp.interpolate(5u, out, 4u));
+        if (!approxEq(out[0].velocity.x, 5.f)) {
+            return 163;
+        }
+    }
+
+    // --- tryVelocityDeltaBetweenLastTwoFrames ---
+    {
+        SnapshotInterpolator<4, 8> interp{};
+        EntityKinematicsSnapshot s1{};
+        s1.simTick = 0u;
+        s1.entity = kEntA;
+        s1.linearVelocity = {3.f, 4.f, 0.f};
+        EntityKinematicsSnapshot s2{};
+        s2.simTick = 10u;
+        s2.entity = kEntA;
+        s2.linearVelocity = {0.f, 0.f, 0.f};
+        interp.pushSnapshot(0u, &s1, 1u);
+        interp.pushSnapshot(10u, &s2, 1u);
+        float d{};
+        if (!interp.tryVelocityDeltaBetweenLastTwoFrames(kEntA, d)) {
+            return 164;
+        }
+        if (!approxEq(d, 5.f)) {
+            return 165;
+        }
+    }
+
+    // --- velocity jump extrapolation: large Δv vs previous frame => no forward integration ---
+    {
+        SnapshotInterpolator<4, 8> interp{};
+        interp.setMaxExtrapolationTicks(6u);
+        interp.setVelocityJumpExtrapolationThresholdMps(5.f);
+
+        EntityKinematicsSnapshot s1{};
+        s1.simTick = 0u;
+        s1.entity = kEntA;
+        s1.positionLocal = {0.f, 0.f, 0.f};
+        s1.linearVelocity = {0.f, 0.f, 0.f};
+
+        EntityKinematicsSnapshot s2{};
+        s2.simTick = 10u;
+        s2.entity = kEntA;
+        s2.positionLocal = {5.f, 0.f, 0.f};
+        s2.linearVelocity = {10.f, 0.f, 0.f};
+
+        interp.pushSnapshot(0u, &s1, 1u);
+        interp.pushSnapshot(10u, &s2, 1u);
+
+        InterpolatedEntity out[4]{};
+        static_cast<void>(interp.interpolate(16u, out, 4u));
+        if (!vec3Eq(out[0].position, {5.f, 0.f, 0.f})) {
+            return 170;
+        }
+        if (!approxEq(out[0].velocity.x, 10.f)) {
+            return 171;
+        }
+
+        interp.setVelocityJumpExtrapolationThresholdMps(0.f);
+        static_cast<void>(interp.interpolate(16u, out, 4u));
+        // dt = min(renderTick - newestSimTick, maxExtrap) = 6; x = 5 + 10*6
+        if (!approxEq(out[0].position.x, 65.f)) {
+            return 172;
         }
     }
 

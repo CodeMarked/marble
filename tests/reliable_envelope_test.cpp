@@ -7,13 +7,13 @@
 int main() {
     using namespace marble::gameplay;
 
-    // --- protocol version is 2 ---
-    static_assert(kMarbleSessionProtocolVersion == 2u, "expected protocol version 2");
+    static_assert(kMarbleSessionProtocolVersion == 5u, "expected protocol version 5");
 
     // --- unreliable Hello still works (flags = 0) ---
     SessionHelloPayload helloIn{};
     helloIn.clientUdpPortHost = 54321u;
     helloIn.clientNonce = 0x11223344u;
+    helloIn.joinTokenU32 = 0x99aabbccu;
 
     std::array<std::uint8_t, 64> buf{};
     std::size_t const nHello = writeSessionHello(buf.data(), buf.size(), helloIn);
@@ -36,20 +36,21 @@ int main() {
         return 5;
     }
     if (helloOut.clientUdpPortHost != helloIn.clientUdpPortHost ||
-        helloOut.clientNonce != helloIn.clientNonce) {
+        helloOut.clientNonce != helloIn.clientNonce || helloOut.joinTokenU32 != helloIn.joinTokenU32) {
         return 6;
     }
 
     // --- reliable HelloAck round-trip ---
     SessionHelloAckPayload ackIn{};
     ackIn.assignedPeerId = 7u;
+    ackIn.serverSimTickAtAck = 99u;
     ackIn.echoClientNonce = helloIn.clientNonce;
 
     std::array<std::uint8_t, 64> ackBuf{};
     std::size_t const nAck = writeSessionHelloAckReliable(
         ackBuf.data(), ackBuf.size(), ackIn, 1u, 0u, 0u
     );
-    // envelope(8) + reliable header(8) + HelloAck payload(8) = 24
+    // envelope(8) + reliable header(8) + HelloAck payload(12) = 28
     if (nAck != kSessionEnvelopeBytes + kReliableHeaderBytes + kSessionHelloAckPayloadBytes) {
         return 7;
     }
@@ -82,7 +83,8 @@ int main() {
     if (!readSessionHelloAck(innerPl, innerLen, ackOut)) {
         return 13;
     }
-    if (ackOut.assignedPeerId != 7u || ackOut.echoClientNonce != helloIn.clientNonce) {
+    if (ackOut.assignedPeerId != 7u || ackOut.serverSimTickAtAck != 99u ||
+        ackOut.echoClientNonce != helloIn.clientNonce) {
         return 14;
     }
 
@@ -145,6 +147,70 @@ int main() {
         return 29;
     }
 
+    // --- reliable TimePing / TimePong (protocol v4) ---
+    SessionTimePingPayload pingIn{};
+    pingIn.clientPingId = 0x55aa6601u;
+    std::array<std::uint8_t, 64> pingBuf{};
+    std::size_t const nPing = writeSessionTimePingReliable(
+        pingBuf.data(), pingBuf.size(), pingIn, 3u, 2u, 0xCu);
+    if (nPing != kSessionEnvelopeBytes + kReliableHeaderBytes + kSessionTimePingPayloadBytes) {
+        return 40;
+    }
+    if (!parseSessionEnvelopeEx(pingBuf.data(), nPing, t, flags, pl, plen)) {
+        return 41;
+    }
+    if (t != SessionMessageType::TimePing || (flags & kSessionEnvelopeFlag_Reliable) == 0u) {
+        return 42;
+    }
+    if (!readReliableHeader(pl, plen, seq, ackSeq, ackBits)) {
+        return 43;
+    }
+    if (seq != 3u || ackSeq != 2u || ackBits != 0xCu) {
+        return 44;
+    }
+    {
+        std::uint8_t const* innerPing = pl + kReliableHeaderBytes;
+        std::size_t const innerPingLen = plen - kReliableHeaderBytes;
+        SessionTimePingPayload pingOut{};
+        if (!readSessionTimePing(innerPing, innerPingLen, pingOut) ||
+            pingOut.clientPingId != pingIn.clientPingId) {
+            return 45;
+        }
+    }
+
+    SessionTimePongPayload pongIn{};
+    pongIn.clientPingId = pingIn.clientPingId;
+    pongIn.serverSimTick = 1001u;
+    std::array<std::uint8_t, 64> pongBuf{};
+    std::size_t const nPong = writeSessionTimePongReliable(
+        pongBuf.data(), pongBuf.size(), pongIn, 4u, 3u, 0u);
+    if (nPong != kSessionEnvelopeBytes + kReliableHeaderBytes + kSessionTimePongPayloadBytes) {
+        return 46;
+    }
+    if (!parseSessionEnvelopeEx(pongBuf.data(), nPong, t, flags, pl, plen)) {
+        return 47;
+    }
+    if (t != SessionMessageType::TimePong) {
+        return 48;
+    }
+    if (!readReliableHeader(pl, plen, seq, ackSeq, ackBits)) {
+        return 49;
+    }
+    if (seq != 4u) {
+        return 50;
+    }
+    {
+        std::uint8_t const* innerPong = pl + kReliableHeaderBytes;
+        std::size_t const innerPongLen = plen - kReliableHeaderBytes;
+        SessionTimePongPayload pongOut{};
+        if (!readSessionTimePong(innerPong, innerPongLen, pongOut)) {
+            return 51;
+        }
+        if (pongOut.clientPingId != pongIn.clientPingId || pongOut.serverSimTick != 1001u) {
+            return 52;
+        }
+    }
+
     // --- reject undersized envelope ---
     if (parseSessionEnvelopeEx(buf.data(), kSessionEnvelopeBytes - 1u, t, flags, pl, plen)) {
         return 30;
@@ -164,6 +230,23 @@ int main() {
     writeU8(v1Buf.data() + 7u, 0u);
     if (parseSessionEnvelopeEx(v1Buf.data(), 8u, t, flags, pl, plen)) {
         return 32; // must reject version 1
+    }
+
+    // --- readSessionTimePing / readSessionTimePong reject truncated payloads ---
+    {
+        std::array<std::uint8_t, 4> shortPing{};
+        writeU32Le(shortPing.data(), 0x11223344u);
+        SessionTimePingPayload pingTmp{};
+        if (readSessionTimePing(shortPing.data(), kSessionTimePingPayloadBytes - 1u, pingTmp)) {
+            return 53;
+        }
+        std::array<std::uint8_t, 8> shortPong{};
+        writeU32Le(shortPong.data(), 1u);
+        writeU32Le(shortPong.data() + 4u, 2u);
+        SessionTimePongPayload pongTmp{};
+        if (readSessionTimePong(shortPong.data(), kSessionTimePongPayloadBytes - 1u, pongTmp)) {
+            return 54;
+        }
     }
 
     return 0;

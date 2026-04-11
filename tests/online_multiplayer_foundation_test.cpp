@@ -18,6 +18,16 @@ int main() {
         return 4;
     }
 
+    if (isValid(SessionConfig{MultiplayerMode::DedicatedServer, 8u, 60u, 25u, 2u})) {
+        return 35;
+    }
+    if (isValid(SessionConfig{MultiplayerMode::DedicatedServer, 8u, 60u, 16u, 2u})) {
+        return 36;
+    }
+    if (!isValid(SessionConfig{MultiplayerMode::DedicatedServer, 8u, 60u, 30u, 2u})) {
+        return 37;
+    }
+
     if (!connectionTransitionAllowed(ConnectionState::Disconnected, ConnectionState::Connecting)) {
         return 5;
     }

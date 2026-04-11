@@ -984,6 +984,20 @@ add_test(
     COMMAND authoritative_session_udp_disconnect_test
 )
 
+add_executable(authoritative_session_udp_listen_joiner_peer_id_test
+    authoritative_session_udp_listen_joiner_peer_id_test.cpp
+)
+
+target_link_libraries(authoritative_session_udp_listen_joiner_peer_id_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME authoritative_session_udp_listen_joiner_peer_id_test
+    COMMAND authoritative_session_udp_listen_joiner_peer_id_test
+)
+
 add_executable(multiplayer_session_envelope_test
     multiplayer_session_envelope_test.cpp
 )
@@ -1038,6 +1052,76 @@ PRIVATE
 add_test(
     NAME authoritative_session_test
     COMMAND authoritative_session_test
+)
+
+add_executable(session_time_ping_pong_test
+    session_time_ping_pong_test.cpp
+)
+
+target_link_libraries(session_time_ping_pong_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME session_time_ping_pong_test
+    COMMAND session_time_ping_pong_test
+)
+
+add_executable(client_session_reconnect_loopback_test
+    client_session_reconnect_loopback_test.cpp
+)
+
+target_link_libraries(client_session_reconnect_loopback_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME client_session_reconnect_loopback_test
+    COMMAND client_session_reconnect_loopback_test
+)
+
+add_executable(authoritative_session_aoi_test
+    authoritative_session_aoi_test.cpp
+)
+
+target_link_libraries(authoritative_session_aoi_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME authoritative_session_aoi_test
+    COMMAND authoritative_session_aoi_test
+)
+
+add_executable(authoritative_session_snapshot_budget_test
+    authoritative_session_snapshot_budget_test.cpp
+)
+
+target_link_libraries(authoritative_session_snapshot_budget_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME authoritative_session_snapshot_budget_test
+    COMMAND authoritative_session_snapshot_budget_test
+)
+
+add_executable(multiplayer_metrics_harness_test
+    multiplayer_metrics_harness_test.cpp
+)
+
+target_link_libraries(multiplayer_metrics_harness_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME multiplayer_metrics_harness_test
+    COMMAND multiplayer_metrics_harness_test
 )
 
 add_executable(snapshot_interpolator_test
@@ -1109,6 +1193,71 @@ PRIVATE
 add_test(
     NAME garden_server_smoke_test
     COMMAND garden_server_smoke_test
+)
+
+add_executable(garden_authority_dedicated_idle_physics_test
+    garden_authority_dedicated_idle_physics_test.cpp
+)
+
+target_link_libraries(garden_authority_dedicated_idle_physics_test
+PRIVATE
+    engine
+    garden_sim
+)
+
+add_test(
+    NAME garden_authority_dedicated_idle_physics_test
+    COMMAND garden_authority_dedicated_idle_physics_test
+)
+
+add_executable(garden_marble_determinism_test
+    garden_marble_determinism_test.cpp
+)
+
+target_link_libraries(garden_marble_determinism_test
+PRIVATE
+    engine
+    garden_sim
+)
+
+add_test(
+    NAME garden_marble_determinism_test
+    COMMAND garden_marble_determinism_test
+)
+
+add_executable(garden_remote_reconcile_test
+    garden_remote_reconcile_test.cpp
+)
+
+target_link_libraries(garden_remote_reconcile_test
+PRIVATE
+    engine
+    garden_sim
+)
+
+add_test(
+    NAME garden_remote_reconcile_test
+    COMMAND garden_remote_reconcile_test
+)
+
+add_executable(sample_mesh_spirv_artifact_test
+    sample_mesh_spirv_artifact_test.cpp
+)
+
+target_include_directories(sample_mesh_spirv_artifact_test
+PRIVATE
+    ${CMAKE_BINARY_DIR}/game/generated
+)
+
+add_dependencies(sample_mesh_spirv_artifact_test marbles_shaders)
+
+add_test(
+    NAME sample_mesh_spirv_artifact_test
+    COMMAND sample_mesh_spirv_artifact_test
+)
+
+set_tests_properties(sample_mesh_spirv_artifact_test PROPERTIES
+    ENVIRONMENT "MARBLE_SHADER_SPV_DIR=${CMAKE_BINARY_DIR}/game/marbles_shaders"
 )
 
 if(TARGET Jolt)

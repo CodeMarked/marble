@@ -92,7 +92,21 @@ build\vs-debug\game\Debug\marbles.exe --gpu 0
 ./build/game/marbles --gpu 0
 ```
 
-With a resolved assets root (default when `assets/` is staged next to the executable), the demo loads mesh SPIR-V through the binary resource registry from **`assets/shaders/`**; otherwise it falls back to **`shaders/`** beside the executable.
+With a resolved assets root (default when `assets/` is staged next to the executable), the demo loads mesh SPIR-V through the binary resource registry from **`assets/shaders/`**; otherwise it falls back to **`shaders/`** beside the executable. GLSL sources live under **`game/marbles/shaders/`**; CMake lists them in **`MARBLE_SHADER_GLSL_MODULES`**, compiles with **`glslc`**, and generates **`game/generated/MarbleSampleShaderNames.hpp`** (build tree) so C++ uses the same registry virtual paths and `.spv` basenames in list order (vertex, lit fragment, emissive fragment; see ADR-0057).
+
+### Garden dedicated server (dev)
+
+Build the **`garden_server`** target with the same CMake preset as **`marbles`**. The headless server listens on **UDP** (default port **`27778`**).
+
+**Server CLI** (see `garden_server --help` / usage in [`game/garden_server/GardenServerMain.cpp`](game/garden_server/GardenServerMain.cpp)):
+
+- **`--port N`** — UDP port (default `27778`)
+- **`--seed S`** — layout seed (default matches [`kGardenDedicatedServerDefaultLayoutSeed`](game/garden/GardenSimulation.hpp) = `42`)
+- **`--max-players N`**
+- **`--aoi-radius R`** — AOI radius (omit **`--no-aoi`** for interest filtering)
+- **`--no-aoi`** — full snapshots to every peer
+
+**Clients:** run **`marbles`**, choose **Garden – join server** from the menu (defaults target `127.0.0.1:27778`), or launch non-interactively with **`--join <host>`** and optional **`--join-port`**, **`--join-seed`** (match the server **`--seed`** so the local layout lines up with replicated state; default join seed is already `42`). **Two players:** start two **`marbles`** instances with the same host/port (localhost or LAN).
 
 ## Test
 
