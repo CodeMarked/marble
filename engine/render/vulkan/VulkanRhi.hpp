@@ -19,7 +19,9 @@ namespace marble::render {
 
 struct VulkanRhiImpl;
 
-/// Minimal Vulkan swapchain + single graphics pipeline + mesh uploads for game use.
+/// Minimal Vulkan swapchain + mesh material pipelines + mesh uploads for game use.
+/// `MeshDrawInstance::materialId` / `drawLayer` select pipeline variant and sort order within the swapchain pass.
+/// Shaders: use `initFromSpirvBytes` with SPIR-V from files, packs, or registry.
 class VulkanRhi : public IRenderBackend {
 public:
     struct Vertex {
@@ -43,22 +45,16 @@ public:
     VulkanRhi& operator=(VulkanRhi&&) noexcept;
     ~VulkanRhi();
 
-    /// Loads SPIR-V from `shaderDirectory` (`mesh.vert.spv`, `mesh.frag.spv`).
+    /// SPIR-V sizes must be multiples of 4. One vertex module; lit fragment plus optional emissive fragment
+    /// (`kPcFlagMeshEmissive` on `MeshDrawInstance::drawFlags` when emissive SPIR-V was provided).
     /// `physicalDeviceIndex`, when set, selects the **n**th suitable adapter after sorting (discrete before integrated).
-    [[nodiscard]] bool init(
-        platform::Window& window,
-        char const* appName,
-        std::string shaderDirectory,
-        std::optional<std::uint32_t> physicalDeviceIndex = std::nullopt
-    );
-
-    /// Same device/swapchain/pipeline setup as `init`, using in-memory SPIR-V (sizes must be multiples of 4).
     [[nodiscard]] bool initFromSpirvBytes(
         platform::Window& window,
         char const* appName,
         std::span<std::uint8_t const> vertSpirv,
         std::span<std::uint8_t const> fragSpirv,
-        std::optional<std::uint32_t> physicalDeviceIndex = std::nullopt
+        std::optional<std::uint32_t> physicalDeviceIndex = std::nullopt,
+        std::span<std::uint8_t const> fragEmissiveSpirv = {}
     );
 
     void shutdown();
