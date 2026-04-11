@@ -2,6 +2,7 @@
 
 #include "math/Mat4.hpp"
 #include "math/Vec3.hpp"
+#include "render/MaterialId.hpp"
 
 #include <cstdint>
 
@@ -25,6 +26,15 @@ struct MeshDrawInstance {
     float colorAlpha = 1.f;
     /// Push constant flags: see `DrawFlags.hpp` (`kPcFlagClipSpace`, `kPcFlagUnlit`, etc.).
     std::uint32_t drawFlags = 0;
+    /// Pipeline slot: `kMaterialDefault`, `kMaterialTranslucent`, etc. Unknown ids map to default in `VulkanRhi`.
+    std::uint8_t materialId = kMaterialDefault;
+    /// Logical draw bucket: lower layers are recorded first within a frame (before `FrameOverlayTint`).
+    std::uint8_t drawLayer = 0;
+    /// Reserved; keeps size a multiple of 16 for stable layout if mirrored to GPU later.
+    std::uint8_t _padding[22]{};
 };
+
+static_assert(sizeof(MeshDrawInstance) % 16 == 0, "MeshDrawInstance size for GPU packing");
+static_assert(kMaterialPipelineSlotCount >= 2, "MaterialId and MeshDrawInstance assume at least default+translucent");
 
 } // namespace marble::render
