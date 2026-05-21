@@ -61,6 +61,42 @@ int main() {
         }
     }
 
+    // --- tryLatestKinematics: latest frame lookup ---
+    {
+        SnapshotInterpolator<4, 8> interp{};
+        EntityKinematicsSnapshot snap{};
+        snap.simTick = 10u;
+        snap.entity = kEntA;
+        snap.positionLocal = {7.f, 8.f, 9.f};
+        snap.linearVelocity = {1.f, 2.f, 3.f};
+        snap.yawRadians = 0.5f;
+        snap.tier = PhysicsSimulationTier::Contact;
+        interp.pushSnapshot(10u, &snap, 1u);
+
+        EntityKinematicsSnapshot latest{};
+        if (!interp.tryLatestKinematics(kEntA, latest)) {
+            return 14;
+        }
+        if (latest.simTick != 10u || latest.entity != kEntA) {
+            return 15;
+        }
+        if (!vec3Eq(latest.positionLocal, {7.f, 8.f, 9.f}) || !vec3Eq(latest.linearVelocity, {1.f, 2.f, 3.f})) {
+            return 16;
+        }
+        if (!approxEq(latest.yawRadians, 0.5f)) {
+            return 17;
+        }
+        static constexpr WorldObjectRef kMissing{0x9999u};
+        EntityKinematicsSnapshot unused{};
+        if (interp.tryLatestKinematics(kMissing, unused)) {
+            return 18;
+        }
+        interp.reset();
+        if (interp.tryLatestKinematics(kEntA, unused)) {
+            return 19;
+        }
+    }
+
     // --- two-frame interpolation: midpoint ---
     {
         SnapshotInterpolator<4, 8> interp{};
@@ -199,8 +235,8 @@ int main() {
         if (n != 1u) {
             return 40;
         }
-        // position = 6 + 2 * 2 = 10
-        if (!approxEq(out[0].position.x, 10.f)) {
+        // Extrapolate 2 ticks at 60 Hz: 6 + vx * (2/60), vx=2
+        if (!approxEq(out[0].position.x, 6.f + 2.f * (2.f / 60.f))) {
             return 41;
         }
         if (!out[0].extrapolated) {
@@ -232,8 +268,8 @@ int main() {
         if (n != 1u) {
             return 50;
         }
-        // position = 0 + 1 * 3 = 3 (not 10)
-        if (!approxEq(out[0].position.x, 3.f)) {
+        // Three ticks at 60 Hz: vx * (3/60)
+        if (!approxEq(out[0].position.x, 1.f * (3.f / 60.f))) {
             return 51;
         }
         if (!out[0].extrapolated) {
@@ -798,8 +834,8 @@ int main() {
 
         interp.setVelocityJumpExtrapolationThresholdMps(0.f);
         static_cast<void>(interp.interpolate(16u, out, 4u));
-        // dt = min(renderTick - newestSimTick, maxExtrap) = 6; x = 5 + 10*6
-        if (!approxEq(out[0].position.x, 65.f)) {
+        // Six ticks at 60 Hz: x = 5 + 10 * (6/60)
+        if (!approxEq(out[0].position.x, 5.f + 10.f * (6.f / 60.f))) {
             return 172;
         }
     }

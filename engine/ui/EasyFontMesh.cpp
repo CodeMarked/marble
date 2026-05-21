@@ -4,7 +4,19 @@
 #pragma warning(push)
 #pragma warning(disable : 4505)
 #endif
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-function"
+#elif defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#endif
 #include "third_party/stb/stb_easy_font.h"
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#elif defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 #if defined(_MSC_VER)
 #pragma warning(pop)
 #endif

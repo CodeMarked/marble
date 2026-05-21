@@ -140,7 +140,10 @@ public:
     }
 
     /// Refine server tick mapping when an authoritative snapshot arrives ([ADR-0060] presentation timeline).
+    /// After the first call while connected, [`SessionMessageType::TimePong`] updates RTT only and no longer
+    /// re-anchors the clock — mixing snapshot ticks with ping ticks caused periodic presentation hitches.
     void noteAuthoritativeSnapshot(std::uint32_t serverSimTick) noexcept {
+        snapshotClockFromSnapshots_ = true;
         lastSyncServerSimTick_ = serverSimTick;
         lastSyncClientSteady_ = std::chrono::steady_clock::now();
         hasServerTimeSync_ = true;
@@ -196,6 +199,7 @@ private:
         hasServerTimeSync_ = false;
         lastSyncServerSimTick_ = 0u;
         lastSyncClientSteady_ = {};
+        snapshotClockFromSnapshots_ = false;
         helloSendSteadyValid_ = false;
         rttEmaSeconds_ = 0.f;
         hasRttEstimate_ = false;
@@ -355,9 +359,11 @@ private:
                 auto const recvTime = std::chrono::steady_clock::now();
                 float const rtt = std::chrono::duration<float>(recvTime - pingSendSteady_).count();
                 applyRttSample_(rtt);
-                lastSyncServerSimTick_ = pong.serverSimTick;
-                lastSyncClientSteady_ = recvTime;
-                hasServerTimeSync_ = true;
+                if (!snapshotClockFromSnapshots_) {
+                    lastSyncServerSimTick_ = pong.serverSimTick;
+                    lastSyncClientSteady_ = recvTime;
+                    hasServerTimeSync_ = true;
+                }
                 outstandingPingId_ = 0u;
                 break;
             }
@@ -439,6 +445,8 @@ private:
     std::uint32_t lastSyncServerSimTick_{};
     float rttEmaSeconds_{};
     bool hasServerTimeSync_{};
+    /// Set by [`noteAuthoritativeSnapshot`]; while true, [`SessionMessageType::TimePong`] does not move the clock.
+    bool snapshotClockFromSnapshots_{};
     bool helloSendSteadyValid_{};
     bool hasRttEstimate_{};
 

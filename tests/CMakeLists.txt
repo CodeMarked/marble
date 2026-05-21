@@ -366,6 +366,84 @@ add_test(
     COMMAND resource_manager_test
 )
 
+add_executable(mesh_asset_v1_test
+    mesh_asset_v1_test.cpp
+)
+
+target_link_libraries(mesh_asset_v1_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME mesh_asset_v1_test
+    COMMAND mesh_asset_v1_test
+)
+
+add_executable(mesh_asset_v1_decode_for_upload_test
+    mesh_asset_v1_decode_for_upload_test.cpp
+)
+
+target_link_libraries(mesh_asset_v1_decode_for_upload_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME mesh_asset_v1_decode_for_upload_test
+    COMMAND mesh_asset_v1_decode_for_upload_test
+)
+
+add_executable(asset_pack_read_test
+    asset_pack_read_test.cpp
+)
+
+target_link_libraries(asset_pack_read_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME asset_pack_read_test
+    COMMAND asset_pack_read_test
+)
+
+add_executable(asset_pack_write_roundtrip_test
+    asset_pack_write_roundtrip_test.cpp
+)
+
+target_link_libraries(asset_pack_write_roundtrip_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME asset_pack_write_roundtrip_test
+    COMMAND asset_pack_write_roundtrip_test
+)
+
+add_test(
+    NAME marble_pack_v1_cli_smoke
+    COMMAND $<TARGET_FILE:marble_pack_v1>
+            ${CMAKE_BINARY_DIR}/marble_pack_v1_cli_smoke.marbpak
+            shaders/mesh.vert.spv
+            ${CMAKE_BINARY_DIR}/game/garden_shaders/mesh.vert.spv
+)
+
+add_test(
+    NAME marble_mesh_v1_cli_smoke
+    COMMAND $<TARGET_FILE:marble_mesh_v1>
+            ${CMAKE_BINARY_DIR}/marble_mesh_v1_cli_smoke.mesh
+            --demo-triangle
+)
+
+add_test(
+    NAME marble_mesh_v1_cli_ramp
+    COMMAND $<TARGET_FILE:marble_mesh_v1>
+            ${CMAKE_BINARY_DIR}/marble_mesh_v1_cli_ramp.mesh
+            --demo-ramp
+)
+
 add_executable(irender_backend_test
     irender_backend_test.cpp
 )
@@ -379,6 +457,8 @@ add_test(
     NAME irender_backend_test
     COMMAND irender_backend_test
 )
+
+set_tests_properties(irender_backend_test PROPERTIES TIMEOUT 20)
 
 add_executable(mesh_draw_recorder_test
     mesh_draw_recorder_test.cpp
@@ -414,7 +494,6 @@ add_executable(garden_simulation_test
 
 target_link_libraries(garden_simulation_test
 PRIVATE
-    engine
     garden_sim
 )
 
@@ -1040,6 +1119,20 @@ add_test(
     COMMAND reliable_envelope_test
 )
 
+add_executable(multiplayer_protocol_edge_test
+    multiplayer_protocol_edge_test.cpp
+)
+
+target_link_libraries(multiplayer_protocol_edge_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME multiplayer_protocol_edge_test
+    COMMAND multiplayer_protocol_edge_test
+)
+
 add_executable(authoritative_session_test
     authoritative_session_test.cpp
 )
@@ -1166,6 +1259,20 @@ add_test(
     COMMAND jolt_dynamic_capsule_test
 )
 
+add_executable(jolt_static_shapes_test
+    jolt_static_shapes_test.cpp
+)
+
+target_link_libraries(jolt_static_shapes_test
+PRIVATE
+    engine
+)
+
+add_test(
+    NAME jolt_static_shapes_test
+    COMMAND jolt_static_shapes_test
+)
+
 add_executable(interest_management_test
     interest_management_test.cpp
 )
@@ -1186,7 +1293,6 @@ add_executable(garden_server_smoke_test
 
 target_link_libraries(garden_server_smoke_test
 PRIVATE
-    engine
     garden_sim
 )
 
@@ -1201,7 +1307,6 @@ add_executable(garden_authority_dedicated_idle_physics_test
 
 target_link_libraries(garden_authority_dedicated_idle_physics_test
 PRIVATE
-    engine
     garden_sim
 )
 
@@ -1216,7 +1321,6 @@ add_executable(garden_marble_determinism_test
 
 target_link_libraries(garden_marble_determinism_test
 PRIVATE
-    engine
     garden_sim
 )
 
@@ -1231,7 +1335,6 @@ add_executable(garden_remote_reconcile_test
 
 target_link_libraries(garden_remote_reconcile_test
 PRIVATE
-    engine
     garden_sim
 )
 
@@ -1246,10 +1349,11 @@ add_executable(sample_mesh_spirv_artifact_test
 
 target_include_directories(sample_mesh_spirv_artifact_test
 PRIVATE
+    ${CMAKE_SOURCE_DIR}/engine
     ${CMAKE_BINARY_DIR}/game/generated
 )
 
-add_dependencies(sample_mesh_spirv_artifact_test marbles_shaders)
+add_dependencies(sample_mesh_spirv_artifact_test garden_shaders)
 
 add_test(
     NAME sample_mesh_spirv_artifact_test
@@ -1257,7 +1361,34 @@ add_test(
 )
 
 set_tests_properties(sample_mesh_spirv_artifact_test PROPERTIES
-    ENVIRONMENT "MARBLE_SHADER_SPV_DIR=${CMAKE_BINARY_DIR}/game/marbles_shaders"
+    ENVIRONMENT "MARBLE_SHADER_SPV_DIR=${CMAKE_BINARY_DIR}/game/garden_shaders"
+)
+
+add_executable(sample_mesh_shader_pack_runtime_test
+    sample_mesh_shader_pack_runtime_test.cpp
+)
+
+target_include_directories(sample_mesh_shader_pack_runtime_test
+PRIVATE
+    ${CMAKE_SOURCE_DIR}/engine
+    ${CMAKE_SOURCE_DIR}/game
+    ${CMAKE_BINARY_DIR}/game/generated
+)
+
+target_link_libraries(sample_mesh_shader_pack_runtime_test
+PRIVATE
+    engine
+)
+
+add_dependencies(sample_mesh_shader_pack_runtime_test garden_shaders)
+
+add_test(
+    NAME sample_mesh_shader_pack_runtime_test
+    COMMAND sample_mesh_shader_pack_runtime_test
+)
+
+set_tests_properties(sample_mesh_shader_pack_runtime_test PROPERTIES
+    ENVIRONMENT "MARBLE_SHADER_SPV_DIR=${CMAKE_BINARY_DIR}/game/garden_shaders"
 )
 
 if(TARGET Jolt)
@@ -1271,5 +1402,30 @@ if(TARGET Jolt)
     add_test(
         NAME jolt_physics_smoke_test
         COMMAND jolt_physics_smoke_test
+    )
+endif()
+
+option(MARBLE_BUILD_VULKAN_SMOKE_TEST "Build Vulkan RHI swapchain smoke test (GPU/display; default off)" OFF)
+if(MARBLE_BUILD_VULKAN_SMOKE_TEST)
+    add_executable(vulkan_rhi_swapchain_smoke_test
+        vulkan_rhi_swapchain_smoke_test.cpp
+    )
+    target_include_directories(vulkan_rhi_swapchain_smoke_test
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/engine
+        ${CMAKE_SOURCE_DIR}/game
+        ${CMAKE_BINARY_DIR}/game/generated
+    )
+    target_link_libraries(vulkan_rhi_swapchain_smoke_test
+    PRIVATE
+        engine
+    )
+    add_dependencies(vulkan_rhi_swapchain_smoke_test garden_shaders)
+    add_test(
+        NAME vulkan_rhi_swapchain_smoke_test
+        COMMAND vulkan_rhi_swapchain_smoke_test
+    )
+    set_tests_properties(vulkan_rhi_swapchain_smoke_test PROPERTIES
+        ENVIRONMENT "MARBLE_SHADER_SPV_DIR=${CMAKE_BINARY_DIR}/game/garden_shaders"
     )
 endif()

@@ -8,7 +8,6 @@
 #include "gameplay/UdpGameTransport.hpp"
 #include "physics/IPhysicsScene.hpp"
 #include "physics/MiddlewarePhysicsTypes.hpp"
-#include "physics/PhysicsWorld.hpp"
 #include "physics/RigidBodyDynamics.hpp"
 
 #include <array>
@@ -55,6 +54,7 @@ int main() {
         desc.material.friction = 0.42f;
         desc.material.linearDamping = 0.02f;
         desc.material.angularDamping = 0.10f;
+        desc.enhancedInternalEdgeRemoval = true;
         bodyIds[i] = physics->addDynamicSphere(desc);
         if (bodyIds[i] == marble::physics::kInvalidPhysicsBodyId) {
             return 3;
@@ -62,11 +62,7 @@ int main() {
     }
     physics->optimizeBroadPhase();
 
-    marble::physics::PhysicsWorldSettings world{};
-    world.gravity = {0.f, -9.81f, 0.f};
-    world.enableSleeping = false;
-    world.enableContinuousCollision = true;
-    world.maxSubSteps = 1u;
+    marble::physics::PhysicsWorldSettings const world = marble::garden::gardenAuthorityPhysicsWorldSettings();
 
     std::array<float, 2> jumpHold{};
     std::array<bool, 2> jumpWas{};
@@ -85,7 +81,8 @@ int main() {
             marbles.size(),
             std::span(jumpHold.data(), jumpHold.size()),
             std::span(jumpWas.data(), jumpWas.size()),
-            world);
+            world
+        );
     }
 
     marble::physics::RigidBodyKinematics readBack{};

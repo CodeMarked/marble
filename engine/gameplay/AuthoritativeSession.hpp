@@ -60,6 +60,7 @@ public:
         peerEntityEverSent_.fill({});
         peerBadPayloadCount_.fill(0);
         peerClientInputPacketsThisTick_.fill(0);
+        fullSnapshotWhenActiveAtMost_ = 0u;
         initialized_ = true;
         return true;
     }
@@ -230,6 +231,18 @@ public:
                 return;
             }
         }
+    }
+
+    /// When the number of **active** replicated entities is at most `n` (and `n > 0`), snapshot emission
+    /// bypasses AOI filtering, ignores [`SessionConfig::maxSnapshotBytesPerPeer`] for that payload, disables
+    /// per-tick fingerprint "unchanged" skipping, and emits **all** active entities sorted by `entity.guid`
+    /// ascending. Intended for small-roster samples (e.g. garden marbles) so clients always receive a full set
+    /// per tick ([`SnapshotInterpolator`] assumes consistent membership across frames).
+    void setFullSnapshotWhenActiveEntityCountAtMost(std::uint32_t n) noexcept {
+        fullSnapshotWhenActiveAtMost_ = n;
+    }
+    [[nodiscard]] std::uint32_t fullSnapshotWhenActiveEntityCountAtMost() const noexcept {
+        return fullSnapshotWhenActiveAtMost_;
     }
 
 private:
@@ -519,6 +532,15 @@ private:
             }
         }
 
+        std::size_t activeEntityCount = 0u;
+        for (std::size_t i = 0u; i < kMaxEntities; ++i) {
+            if (entities_[i].active) {
+                ++activeEntityCount;
+            }
+        }
+        bool const forceFullSnapshot = fullSnapshotWhenActiveAtMost_ > 0u &&
+            activeEntityCount <= static_cast<std::size_t>(fullSnapshotWhenActiveAtMost_);
+
         struct ScoredIndex {
             std::size_t entityIndex{};
             float score{};
@@ -530,7 +552,7 @@ private:
             if (!entities_[i].active) {
                 continue;
             }
-            if (aoiEnabled_) {
+            if (!forceFullSnapshot && aoiEnabled_) {
                 math::Vec3 const delta = entities_[i].position - region.viewPosition;
                 float const dist2 = math::lengthSquared(delta);
                 float effectiveR = region.radius;
@@ -550,13 +572,22 @@ private:
             return;
         }
 
-        std::sort(ranked.begin(), ranked.begin() + rankedCount, [](ScoredIndex const& a, ScoredIndex const& b) {
-            return a.score < b.score;
-        });
+        if (forceFullSnapshot) {
+            std::sort(ranked.begin(), ranked.begin() + rankedCount, [this](ScoredIndex const& a, ScoredIndex const& b) {
+                std::uint64_t const ga = entities_[a.entityIndex].entity.guid;
+                std::uint64_t const gb = entities_[b.entityIndex].entity.guid;
+                return ga < gb;
+            });
+        } else {
+            std::sort(ranked.begin(), ranked.begin() + rankedCount, [](ScoredIndex const& a, ScoredIndex const& b) {
+                return a.score < b.score;
+            });
+        }
 
         std::array<std::uint8_t, kTransportBufSize> inner{};
         std::size_t offset = 0u;
-        std::uint32_t const budget = config_.maxSnapshotBytesPerPeer;
+        std::uint32_t const budget =
+            forceFullSnapshot ? 0u : config_.maxSnapshotBytesPerPeer;
         std::size_t const rankedTotal = rankedCount;
 
         auto tryWriteEntity = [&](std::size_t ei) -> bool {
@@ -564,7 +595,7 @@ private:
             std::uint32_t const fp = quantizedKinematicsFingerprint(ent);
             // With multiple entities in-frame, skipping "unchanged" produces a partial payload; clients treat
             // each snapshot as the full replicated set for that tick (see Garden interpolator ingest).
-            bool const unchanged = rankedTotal <= 1u && peerEntityEverSent_[peerSlot][ei] &&
+            bool const unchanged = !forceFullSnapshot && rankedTotal <= 1u && peerEntityEverSent_[peerSlot][ei] &&
                 fp == peerLastFingerprint_[peerSlot][ei];
             if (unchanged) {
                 return false;
@@ -597,7 +628,7 @@ private:
         if (offset == 0u) {
             std::size_t const ei = ranked[0].entityIndex;
             ReplicatedEntity const& ent = entities_[ei];
-            if (budget != 0u && kEntityKinematicsSnapshotWireBytes > budget) {
+            if (!forceFullSnapshot && budget != 0u && kEntityKinematicsSnapshotWireBytes > budget) {
                 return;
             }
             EntityKinematicsSnapshot snap{};
@@ -694,6 +725,7 @@ private:
     float defaultAoiRadius_{500.f};
     float aoiEntityVelocityLookaheadSeconds_{0.5f};
     float aoiViewerPositionLookaheadSeconds_{0.f};
+    std::uint32_t fullSnapshotWhenActiveAtMost_{0};
     std::array<PeerInterestEntry, MaxPlayers> peerInterest_{};
 
     struct PeerInputEntry {

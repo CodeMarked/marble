@@ -13,9 +13,10 @@ namespace marble::physics {
 
 /// Game-agnostic rigid-body **scene** backed by middleware (Jolt). No game layouts or sample constants.
 ///
-/// Extension points (Stage B): additional `add*` overloads (capsule, convex hull). **Landed in Jolt:** per-body
-/// [`CollisionFilter`](CollisionMiddleware.hpp) on [`MiddlewarePhysicsTypes.hpp`](MiddlewarePhysicsTypes.hpp) descriptors
-/// (narrow-phase validate on top of the static/dynamic broadphase), and [`PhysicsWorldSettings::enableSleeping`](PhysicsWorld.hpp).
+/// Static spheres, oriented boxes, capsules, convex hulls, and triangle meshes are implemented on the Jolt backend.
+/// **Landed in Jolt:** per-body [`CollisionFilter`](CollisionMiddleware.hpp) on
+/// [`MiddlewarePhysicsTypes.hpp`](MiddlewarePhysicsTypes.hpp) descriptors (narrow-phase validate on top of the
+/// static/dynamic broadphase), and [`PhysicsWorldSettings::enableSleeping`](PhysicsWorld.hpp).
 class IPhysicsScene {
 public:
     virtual ~IPhysicsScene() noexcept = default;
@@ -23,6 +24,11 @@ public:
     virtual void clear() = 0;
 
     [[nodiscard]] virtual PhysicsBodyId addStaticBox(PhysicsStaticBoxDesc const& desc) = 0;
+    [[nodiscard]] virtual PhysicsBodyId addStaticSphere(PhysicsStaticSphereDesc const& desc) = 0;
+    [[nodiscard]] virtual PhysicsBodyId addStaticOrientedBox(PhysicsStaticOrientedBoxDesc const& desc) = 0;
+    [[nodiscard]] virtual PhysicsBodyId addStaticCapsule(PhysicsStaticCapsuleDesc const& desc) = 0;
+    [[nodiscard]] virtual PhysicsBodyId addStaticConvexHull(PhysicsStaticConvexHullDesc const& desc) = 0;
+    [[nodiscard]] virtual PhysicsBodyId addStaticTriangleMesh(PhysicsStaticTriangleMeshDesc const& desc) = 0;
     [[nodiscard]] virtual PhysicsBodyId addStaticHeightField(PhysicsStaticHeightFieldDesc const& desc) = 0;
     [[nodiscard]] virtual PhysicsBodyId addDynamicSphere(PhysicsDynamicSphereDesc const& desc) = 0;
     [[nodiscard]] virtual PhysicsBodyId addDynamicCapsule(PhysicsDynamicCapsuleDesc const& desc) = 0;

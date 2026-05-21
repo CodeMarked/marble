@@ -12,6 +12,7 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/MarbleCompileOptions.cmake")
 include(CTest)
 
 add_subdirectory(engine)
+add_subdirectory(tools)
 add_subdirectory(game)
 
 if(BUILD_TESTING)

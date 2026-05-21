@@ -1,16 +1,18 @@
 #pragma once
 
 #include "MarbleSampleShaderNames.hpp"
+#include "core/SpirvBytecode.hpp"
 #include "platform/filesystem/FileSystem.hpp"
 
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <span>
 #include <vector>
 
 namespace marble::game_shared {
 
-inline constexpr std::size_t kMaxMeshSpirvBytes = static_cast<std::size_t>(16) * 1024 * 1024;
+inline constexpr std::size_t kMaxMeshSpirvBytes = marble::core::kMaxSpirvBytecodeBytes;
 
 [[nodiscard]] inline bool loadSampleMeshSpirvFromShaderDirectory(
     std::filesystem::path const& shaderDirectory,
@@ -29,17 +31,9 @@ inline constexpr std::size_t kMaxMeshSpirvBytes = static_cast<std::size_t>(16) *
     if (!readBinaryFile(shaderDirectory / kMarbleSampleShaderSpvBasenames[2], outFragEmissiveSpirv)) {
         return false;
     }
-    if (outVertSpirv.empty() || outFragSpirv.empty() || outFragEmissiveSpirv.empty()) {
-        return false;
-    }
-    if (outVertSpirv.size() % 4 != 0 || outFragSpirv.size() % 4 != 0 || outFragEmissiveSpirv.size() % 4 != 0) {
-        return false;
-    }
-    if (outVertSpirv.size() > kMaxMeshSpirvBytes || outFragSpirv.size() > kMaxMeshSpirvBytes ||
-        outFragEmissiveSpirv.size() > kMaxMeshSpirvBytes) {
-        return false;
-    }
-    return true;
+    return marble::core::spirvBytecodeHeaderValid(std::span<std::uint8_t const>(outVertSpirv)) &&
+           marble::core::spirvBytecodeHeaderValid(std::span<std::uint8_t const>(outFragSpirv)) &&
+           marble::core::spirvBytecodeHeaderValid(std::span<std::uint8_t const>(outFragEmissiveSpirv));
 }
 
 } // namespace marble::game_shared

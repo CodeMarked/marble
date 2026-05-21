@@ -1,15 +1,15 @@
 #include "MarbleSampleShaderNames.hpp"
+#include "core/SpirvBytecode.hpp"
 
-#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <span>
+#include <vector>
 
 namespace {
-
-constexpr std::uint32_t kSpirvMagic = 0x07230203;
 
 [[nodiscard]] bool validateSpirvFile(std::filesystem::path const& p) {
     std::error_code ec;
@@ -18,15 +18,19 @@ constexpr std::uint32_t kSpirvMagic = 0x07230203;
         return false;
     }
     std::uintmax_t const sz = std::filesystem::file_size(p, ec);
-    if (ec || sz == 0 || sz % 4 != 0) {
-        std::cerr << "sample_mesh_spirv_artifact_test: bad size (empty or not multiple of 4): " << p << '\n';
+    if (ec || sz == 0 || sz > marble::core::kMaxSpirvBytecodeBytes) {
+        std::cerr << "sample_mesh_spirv_artifact_test: bad file size: " << p << '\n';
         return false;
     }
+    std::vector<std::uint8_t> buf(static_cast<std::size_t>(sz));
     std::ifstream in(p, std::ios::binary);
-    std::uint32_t magic = 0;
-    in.read(reinterpret_cast<char*>(&magic), sizeof(magic));
-    if (!in || magic != kSpirvMagic) {
-        std::cerr << "sample_mesh_spirv_artifact_test: missing SPIR-V magic word: " << p << '\n';
+    in.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(buf.size()));
+    if (!in || static_cast<std::size_t>(in.gcount()) != buf.size()) {
+        std::cerr << "sample_mesh_spirv_artifact_test: read failed: " << p << '\n';
+        return false;
+    }
+    if (!marble::core::spirvBytecodeHeaderValid(std::span<std::uint8_t const>(buf))) {
+        std::cerr << "sample_mesh_spirv_artifact_test: SPIR-V header invalid: " << p << '\n';
         return false;
     }
     return true;

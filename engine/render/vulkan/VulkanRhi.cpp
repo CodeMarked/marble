@@ -1,5 +1,7 @@
 #include "render/vulkan/VulkanRhi.hpp"
 
+#include "core/SpirvBytecode.hpp"
+#include "render/MeshAssetV1HostDecode.hpp"
 #include "render/DrawFlags.hpp"
 #include "render/DrawOrder.hpp"
 #include "render/MaterialId.hpp"
@@ -29,6 +31,12 @@ static_assert(
     marble::render::kActiveShaderCompileStrategy == marble::render::ShaderCompileStrategy::BuildTimeGlslc,
     "Update shader pipeline docs/ADR-0057 when changing default compile strategy"
 );
+
+#if defined(__APPLE__)
+// Some Vulkan headers only expose `VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME` when
+// `VK_ENABLE_BETA_EXTENSIONS` is defined; the extension name is stable in the spec.
+static constexpr char kKhrPortabilitySubsetExtensionName[] = "VK_KHR_portability_subset";
+#endif
 
 #if defined(MARBLE_DEBUG)
 #define MARBLE_VK_ENABLE_VALIDATION 1
@@ -277,11 +285,7 @@ struct VulkanRhiImpl {
     std::span<std::uint8_t const> fragBytes,
     std::span<std::uint8_t const> fragEmissiveBytes = {}
 ) noexcept {
-    constexpr std::size_t kMaxBytes = static_cast<std::size_t>(16) * 1024 * 1024;
-    if (vertBytes.empty() || fragBytes.empty() || vertBytes.size() % 4 != 0 || fragBytes.size() % 4 != 0) {
-        return false;
-    }
-    if (vertBytes.size() > kMaxBytes || fragBytes.size() > kMaxBytes) {
+    if (!marble::core::spirvBytecodeHeaderValid(vertBytes) || !marble::core::spirvBytecodeHeaderValid(fragBytes)) {
         return false;
     }
     d.vertShaderCode.resize(vertBytes.size() / 4);
@@ -291,7 +295,7 @@ struct VulkanRhiImpl {
     if (fragEmissiveBytes.empty()) {
         d.fragEmissiveShaderCode.clear();
     } else {
-        if (fragEmissiveBytes.size() % 4 != 0 || fragEmissiveBytes.size() > kMaxBytes) {
+        if (!marble::core::spirvBytecodeHeaderValid(fragEmissiveBytes)) {
             return false;
         }
         d.fragEmissiveShaderCode.resize(fragEmissiveBytes.size() / 4);
@@ -305,6 +309,12 @@ void destroySwapchainImagesAndDepth(VulkanRhiImpl& d) {
     if (d.device == VK_NULL_HANDLE) {
         return;
     }
+    for (VkSemaphore const s : d.renderFinishedSemaphores) {
+        if (s != VK_NULL_HANDLE) {
+            vkDestroySemaphore(d.device, s, nullptr);
+        }
+    }
+    d.renderFinishedSemaphores.clear();
     for (auto fb : d.framebuffers) {
         vkDestroyFramebuffer(d.device, fb, nullptr);
     }
@@ -349,7 +359,7 @@ void destroySwapchainOnly(VulkanRhiImpl& d) {
         return false;
     }
 #if defined(__APPLE__)
-    if (names.count(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME) == 0) {
+    if (names.count(kKhrPortabilitySubsetExtensionName) == 0) {
         return false;
     }
 #endif
@@ -514,9 +524,23 @@ bool createSwapchainFull(VulkanRhiImpl& impl, platform::Window& window, VkSwapch
 bool recreateSwapchain(VulkanRhiImpl& impl, platform::Window& window) {
     int w = 0, h = 0;
     window.getFramebufferSize(&w, &h);
-    while (w == 0 || h == 0) {
+    // Minimized windows can report 0x0 indefinitely; do not block the render thread.
+    int constexpr kMaxZeroFramebufferPolls = 4096;
+    int polls = 0;
+    while ((w == 0 || h == 0) && polls < kMaxZeroFramebufferPolls) {
+        ++polls;
         window.getFramebufferSize(&w, &h);
         window.pollEvents();
+    }
+    if (w == 0 || h == 0) {
+#if MARBLE_VK_ENABLE_VALIDATION
+        fprintf(
+            stderr,
+            "VulkanRhi: recreateSwapchain gave up after %d polls (framebuffer still 0x0; minimized?)\n",
+            polls
+        );
+#endif
+        return false;
     }
     vkDeviceWaitIdle(impl.device);
     VkSwapchainKHR const oldSwapchain = impl.swapchain;
@@ -674,6 +698,19 @@ bool createSwapchainFull(VulkanRhiImpl& impl, platform::Window& window, VkSwapch
         return false;
     }
     impl.imagesInFlight.assign(n, VK_NULL_HANDLE);
+
+    VkSemaphoreCreateInfo rfSci{};
+    rfSci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    impl.renderFinishedSemaphores.resize(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        if (vkCreateSemaphore(impl.device, &rfSci, nullptr, &impl.renderFinishedSemaphores[i]) != VK_SUCCESS) {
+            for (std::size_t j = 0; j < i; ++j) {
+                vkDestroySemaphore(impl.device, impl.renderFinishedSemaphores[j], nullptr);
+            }
+            impl.renderFinishedSemaphores.clear();
+            return false;
+        }
+    }
     return true;
 }
 
@@ -1092,9 +1129,19 @@ bool createRenderPassAndPipeline(VulkanRhiImpl& impl) {
         return a.enumeratedIndex < b.enumeratedIndex;
     });
 
+    // `physicalDeviceIndex` is the n-th **suitable** adapter (swapchain + queues + extensions),
+    // not the raw `vkEnumeratePhysicalDevices` index. Stable tie-break uses Vulkan enumerate order.
     std::size_t pick = 0;
     if (physicalDeviceIndex.has_value()) {
         if (*physicalDeviceIndex >= suitable.size()) {
+#if MARBLE_VK_ENABLE_VALIDATION
+            fprintf(
+                stderr,
+                "VulkanRhi: physicalDeviceIndex=%u out of range (suitable adapters: %zu)\n",
+                static_cast<unsigned>(*physicalDeviceIndex),
+                suitable.size()
+            );
+#endif
             return false;
         }
         pick = static_cast<std::size_t>(*physicalDeviceIndex);
@@ -1119,7 +1166,7 @@ bool createRenderPassAndPipeline(VulkanRhiImpl& impl) {
 #if defined(__APPLE__)
     char const* devExt[] = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-        VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME,
+        kKhrPortabilitySubsetExtensionName,
     };
     std::uint32_t const devExtCount = 2;
 #else
@@ -1218,7 +1265,6 @@ bool createRenderPassAndPipeline(VulkanRhiImpl& impl) {
     }
 
     d.imageAvailableSemaphores.resize(VulkanRhiImpl::kMaxFramesInFlight);
-    d.renderFinishedSemaphores.resize(VulkanRhiImpl::kMaxFramesInFlight);
     d.inFlightFences.resize(VulkanRhiImpl::kMaxFramesInFlight);
     VkSemaphoreCreateInfo sci{};
     sci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
@@ -1227,7 +1273,6 @@ bool createRenderPassAndPipeline(VulkanRhiImpl& impl) {
     fci.flags = VK_FENCE_CREATE_SIGNALED_BIT;
     for (int i = 0; i < VulkanRhiImpl::kMaxFramesInFlight; ++i) {
         if (vkCreateSemaphore(d.device, &sci, nullptr, &d.imageAvailableSemaphores[i]) != VK_SUCCESS ||
-            vkCreateSemaphore(d.device, &sci, nullptr, &d.renderFinishedSemaphores[i]) != VK_SUCCESS ||
             vkCreateFence(d.device, &fci, nullptr, &d.inFlightFences[i]) != VK_SUCCESS) {
             return false;
         }
@@ -1489,6 +1534,16 @@ std::uint32_t VulkanRhi::uploadMesh(std::span<Vertex const> vertices, std::span<
     return static_cast<std::uint32_t>(d.meshes.size() - 1);
 }
 
+std::uint32_t VulkanRhi::uploadMeshFromMeshAssetV1CpuViews(marble::core::MeshAssetV1CpuViews const& views) {
+    constexpr std::uint32_t kBad = std::numeric_limits<std::uint32_t>::max();
+    std::vector<Vertex> verts;
+    std::vector<std::uint32_t> idx;
+    if (!meshAssetV1CpuViewsToHostBuffers(views, verts, idx)) {
+        return kBad;
+    }
+    return uploadMesh(std::span<Vertex const>(verts.data(), verts.size()), std::span<std::uint32_t const>(idx.data(), idx.size()));
+}
+
 bool VulkanRhi::replaceMesh(
     std::uint32_t meshIndex,
     std::span<Vertex const> vertices,
@@ -1654,7 +1709,21 @@ bool VulkanRhi::drawFrame(
             &imageIndex
         );
     }
+    if (acq == VK_ERROR_DEVICE_LOST || acq == VK_ERROR_SURFACE_LOST_KHR) {
+#if MARBLE_VK_ENABLE_VALIDATION
+        fprintf(
+            stderr,
+            "VulkanRhi: vkAcquireNextImageKHR unrecoverable (%d); call shutdown() then initFromSpirvBytes()\n",
+            static_cast<int>(acq)
+        );
+#endif
+        return false;
+    }
+    bool const needRecreateAfterPresent = (acq == VK_SUBOPTIMAL_KHR);
     if (acq != VK_SUCCESS && acq != VK_SUBOPTIMAL_KHR) {
+#if MARBLE_VK_ENABLE_VALIDATION
+        fprintf(stderr, "VulkanRhi: vkAcquireNextImageKHR failed (%d)\n", static_cast<int>(acq));
+#endif
         return false;
     }
 
@@ -1800,15 +1869,23 @@ bool VulkanRhi::drawFrame(
     si.commandBufferCount = 1;
     si.pCommandBuffers = &cb;
     si.signalSemaphoreCount = 1;
-    si.pSignalSemaphores = &d.renderFinishedSemaphores[d.currentFrame];
-    if (vkQueueSubmit(d.graphicsQueue, 1, &si, d.inFlightFences[d.currentFrame]) != VK_SUCCESS) {
+    si.pSignalSemaphores = &d.renderFinishedSemaphores[imageIndex];
+    VkResult const submitRes = vkQueueSubmit(d.graphicsQueue, 1, &si, d.inFlightFences[d.currentFrame]);
+    if (submitRes != VK_SUCCESS) {
+#if MARBLE_VK_ENABLE_VALIDATION
+        fprintf(
+            stderr,
+            "VulkanRhi: vkQueueSubmit failed (%d); if DEVICE_LOST, shutdown() then initFromSpirvBytes()\n",
+            static_cast<int>(submitRes)
+        );
+#endif
         return false;
     }
 
     VkPresentInfoKHR pi{};
     pi.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     pi.waitSemaphoreCount = 1;
-    pi.pWaitSemaphores = &d.renderFinishedSemaphores[d.currentFrame];
+    pi.pWaitSemaphores = &d.renderFinishedSemaphores[imageIndex];
     pi.swapchainCount = 1;
     pi.pSwapchains = &d.swapchain;
     pi.pImageIndices = &imageIndex;
@@ -1817,8 +1894,24 @@ bool VulkanRhi::drawFrame(
         if (!recreateSwapchain(d, window)) {
             return false;
         }
-    } else if (pr != VK_SUCCESS) {
+    } else if (pr == VK_ERROR_DEVICE_LOST || pr == VK_ERROR_SURFACE_LOST_KHR) {
+#if MARBLE_VK_ENABLE_VALIDATION
+        fprintf(
+            stderr,
+            "VulkanRhi: vkQueuePresentKHR unrecoverable (%d); call shutdown() then initFromSpirvBytes()\n",
+            static_cast<int>(pr)
+        );
+#endif
         return false;
+    } else if (pr != VK_SUCCESS) {
+#if MARBLE_VK_ENABLE_VALIDATION
+        fprintf(stderr, "VulkanRhi: vkQueuePresentKHR failed (%d)\n", static_cast<int>(pr));
+#endif
+        return false;
+    } else if (needRecreateAfterPresent) {
+        if (!recreateSwapchain(d, window)) {
+            return false;
+        }
     }
 
     d.currentFrame = (d.currentFrame + 1) % VulkanRhiImpl::kMaxFramesInFlight;

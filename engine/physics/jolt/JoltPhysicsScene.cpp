@@ -1,6 +1,8 @@
 #include "physics/IPhysicsScene.hpp"
 
+#include "core/MeshAssetV1PhysicsExtract.hpp"
 #include "math/Geometry.hpp"
+#include "math/Mat4.hpp"
 #include "math/Vec3.hpp"
 #include "physics/CollisionMiddleware.hpp"
 
@@ -18,7 +20,9 @@
 #include <Jolt/Physics/Collision/ContactListener.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
+#include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
 #include <Jolt/Physics/Collision/Shape/HeightFieldShape.h>
+#include <Jolt/Physics/Collision/Shape/MeshShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/PhysicsSettings.h>
 #include <Jolt/Physics/PhysicsSystem.h>
@@ -142,6 +146,39 @@ public:
     return Vec3(v.x, v.y, v.z);
 }
 
+/// Matches [`marble::math::Mat4::rotationY`] * rotationX * rotationZ composition order on column vectors.
+[[nodiscard]] Quat gardenYprToJoltQuat(float yaw, float pitch, float roll) noexcept {
+    Quat const qz = Quat::sRotation(Vec3::sAxisZ(), roll);
+    Quat const qx = Quat::sRotation(Vec3::sAxisX(), pitch);
+    Quat const qy = Quat::sRotation(Vec3::sAxisY(), yaw);
+    return (qy * qx * qz).Normalized();
+}
+
+/// Minimal rotation taking `from` (unit) to `to` (unit); `from` is usually Jolt capsule +Y.
+[[nodiscard]] Quat quatRotateFromTo(Vec3Arg from, Vec3Arg to) noexcept {
+    Vec3 f = from;
+    Vec3 t = to;
+    if (f.IsNearZero(1.0e-12f) || t.IsNearZero(1.0e-12f)) {
+        return Quat::sIdentity();
+    }
+    f = f.Normalized();
+    t = t.Normalized();
+    float const d = f.Dot(t);
+    if (d > 1.0f - 1.0e-5f) {
+        return Quat::sIdentity();
+    }
+    if (d < -1.0f + 1.0e-5f) {
+        Vec3 axis = Vec3::sAxisX().Cross(f);
+        if (axis.LengthSq() < 1.0e-8f) {
+            axis = Vec3::sAxisZ().Cross(f);
+        }
+        return Quat::sRotation(axis.Normalized(), JPH_PI);
+    }
+    Vec3 const c = f.Cross(t);
+    float const w = 1.0f + d;
+    return Quat(c.GetX(), c.GetY(), c.GetZ(), w).Normalized();
+}
+
 [[nodiscard]] math::Vec3 fromVec3(Vec3Arg v) noexcept {
     return math::Vec3{v.GetX(), v.GetY(), v.GetZ()};
 }
@@ -263,6 +300,188 @@ public:
         return static_cast<PhysicsBodyId>(slots_.size());
     }
 
+    PhysicsBodyId addStaticSphere(PhysicsStaticSphereDesc const& desc) override {
+        float const rad = std::max(desc.radius, 1.0e-4f);
+        SphereShapeSettings sphere_settings(rad);
+        sphere_settings.SetEmbedded();
+        ShapeSettings::ShapeResult sr = sphere_settings.Create();
+        if (sr.HasError()) {
+            return kInvalidPhysicsBodyId;
+        }
+        ShapeRefC shape = sr.Get();
+        BodyCreationSettings body_settings(
+            shape,
+            toRVec3(desc.center),
+            Quat::sIdentity(),
+            EMotionType::Static,
+            Layers::NON_MOVING);
+        body_settings.mRestitution = desc.material.restitution;
+        body_settings.mFriction = desc.material.friction;
+        body_settings.mUserData = packFilter(desc.filter);
+        BodyInterface& iface = impl_->physics_system.GetBodyInterface();
+        Body* body = iface.CreateBody(body_settings);
+        if (body == nullptr) {
+            return kInvalidPhysicsBodyId;
+        }
+        iface.AddBody(body->GetID(), EActivation::DontActivate);
+        slots_.push_back(BodySlot{body->GetID(), true});
+        return static_cast<PhysicsBodyId>(slots_.size());
+    }
+
+    PhysicsBodyId addStaticOrientedBox(PhysicsStaticOrientedBoxDesc const& desc) override {
+        Vec3 const half(
+            (std::max)(std::abs(desc.halfExtents.x), 1.0e-4f),
+            (std::max)(std::abs(desc.halfExtents.y), 1.0e-4f),
+            (std::max)(std::abs(desc.halfExtents.z), 1.0e-4f));
+        BoxShapeSettings box_settings(half);
+        box_settings.SetEmbedded();
+        ShapeSettings::ShapeResult shape_result = box_settings.Create();
+        if (shape_result.HasError()) {
+            return kInvalidPhysicsBodyId;
+        }
+        ShapeRefC shape = shape_result.Get();
+        Quat const q = gardenYprToJoltQuat(desc.yawRadians, desc.pitchRadians, desc.rollRadians);
+        BodyCreationSettings body_settings(shape, toRVec3(desc.center), q, EMotionType::Static, Layers::NON_MOVING);
+        body_settings.mRestitution = desc.material.restitution;
+        body_settings.mFriction = desc.material.friction;
+        body_settings.mUserData = packFilter(desc.filter);
+        BodyInterface& iface = impl_->physics_system.GetBodyInterface();
+        Body* body = iface.CreateBody(body_settings);
+        if (body == nullptr) {
+            return kInvalidPhysicsBodyId;
+        }
+        iface.AddBody(body->GetID(), EActivation::DontActivate);
+        slots_.push_back(BodySlot{body->GetID(), true});
+        return static_cast<PhysicsBodyId>(slots_.size());
+    }
+
+    PhysicsBodyId addStaticCapsule(PhysicsStaticCapsuleDesc const& desc) override {
+        float const hh = std::max(desc.halfHeight, 1.0e-4f);
+        float const rad = std::max(desc.radius, 1.0e-4f);
+        CapsuleShapeSettings capsule_settings(hh, rad);
+        capsule_settings.SetEmbedded();
+        ShapeSettings::ShapeResult sr = capsule_settings.Create();
+        if (sr.HasError()) {
+            return kInvalidPhysicsBodyId;
+        }
+        ShapeRefC shape = sr.Get();
+        math::Mat4 const r = math::Mat4::rotationY(desc.yawRadians) * math::Mat4::rotationX(desc.pitchRadians) *
+            math::Mat4::rotationZ(desc.rollRadians);
+        math::Vec3 meshAxis{0.f, 1.f, 0.f};
+        if (desc.intrinsicCylinderAxis == 1u) {
+            meshAxis = {1.f, 0.f, 0.f};
+        } else if (desc.intrinsicCylinderAxis == 2u) {
+            meshAxis = {0.f, 0.f, 1.f};
+        }
+        math::Vec3 const wAxis = math::transformDirection(r, meshAxis);
+        Quat const q = quatRotateFromTo(Vec3::sAxisY(), toVec3(wAxis));
+        BodyCreationSettings body_settings(
+            shape,
+            toRVec3(desc.center),
+            q,
+            EMotionType::Static,
+            Layers::NON_MOVING);
+        body_settings.mRestitution = desc.material.restitution;
+        body_settings.mFriction = desc.material.friction;
+        body_settings.mUserData = packFilter(desc.filter);
+        BodyInterface& iface = impl_->physics_system.GetBodyInterface();
+        Body* body = iface.CreateBody(body_settings);
+        if (body == nullptr) {
+            return kInvalidPhysicsBodyId;
+        }
+        iface.AddBody(body->GetID(), EActivation::DontActivate);
+        slots_.push_back(BodySlot{body->GetID(), true});
+        return static_cast<PhysicsBodyId>(slots_.size());
+    }
+
+    PhysicsBodyId addStaticConvexHull(PhysicsStaticConvexHullDesc const& desc) override {
+        std::size_t const n = desc.points.size();
+        if (n == 0) {
+            return kInvalidPhysicsBodyId;
+        }
+        int const cap = ConvexHullShape::cMaxPointsInHull;
+        Array<Vec3> pts;
+        if (static_cast<int>(n) <= cap) {
+            pts.reserve(static_cast<int>(n));
+            for (math::Vec3 const& p : desc.points) {
+                pts.push_back(toVec3(p));
+            }
+        } else {
+            pts.reserve(cap);
+            for (int i = 0; i < cap; ++i) {
+                std::size_t const idx =
+                    n <= 1 ? 0 : (static_cast<std::size_t>(i) * (n - 1)) / (static_cast<std::size_t>(cap) - 1);
+                pts.push_back(toVec3(desc.points[idx]));
+            }
+        }
+        ConvexHullShapeSettings hull_settings(pts);
+        hull_settings.SetEmbedded();
+        ShapeSettings::ShapeResult const sr = hull_settings.Create();
+        if (sr.HasError()) {
+            return kInvalidPhysicsBodyId;
+        }
+        ShapeRefC shape = sr.Get();
+        Quat const q = gardenYprToJoltQuat(desc.yawRadians, desc.pitchRadians, desc.rollRadians);
+        BodyCreationSettings body_settings(shape, toRVec3(desc.center), q, EMotionType::Static, Layers::NON_MOVING);
+        body_settings.mRestitution = desc.material.restitution;
+        body_settings.mFriction = desc.material.friction;
+        body_settings.mUserData = packFilter(desc.filter);
+        BodyInterface& iface = impl_->physics_system.GetBodyInterface();
+        Body* body = iface.CreateBody(body_settings);
+        if (body == nullptr) {
+            return kInvalidPhysicsBodyId;
+        }
+        iface.AddBody(body->GetID(), EActivation::DontActivate);
+        slots_.push_back(BodySlot{body->GetID(), true});
+        return static_cast<PhysicsBodyId>(slots_.size());
+    }
+
+    PhysicsBodyId addStaticTriangleMesh(PhysicsStaticTriangleMeshDesc const& desc) override {
+        if (desc.vertices.empty() || desc.indices.size() < 3u || desc.indices.size() % 3u != 0u) {
+            return kInvalidPhysicsBodyId;
+        }
+        if (desc.indices.size() / 3u > marble::core::kMeshAssetV1PhysicsMaxTriangles) {
+            return kInvalidPhysicsBodyId;
+        }
+        VertexList vl;
+        vl.reserve(static_cast<int>(desc.vertices.size()));
+        for (math::Vec3 const& v : desc.vertices) {
+            Vec3 const vv = toVec3(v);
+            vl.push_back(Float3(vv.GetX(), vv.GetY(), vv.GetZ()));
+        }
+        IndexedTriangleList tris;
+        tris.reserve(static_cast<int>(desc.indices.size() / 3u));
+        for (std::size_t t = 0; t < desc.indices.size(); t += 3u) {
+            tris.push_back(IndexedTriangle(
+                desc.indices[t],
+                desc.indices[t + 1u],
+                desc.indices[t + 2u],
+                0u
+            ));
+        }
+        MeshShapeSettings mesh_settings(std::move(vl), std::move(tris));
+        mesh_settings.SetEmbedded();
+        ShapeSettings::ShapeResult const sr = mesh_settings.Create();
+        if (sr.HasError()) {
+            return kInvalidPhysicsBodyId;
+        }
+        ShapeRefC shape = sr.Get();
+        Quat const q = gardenYprToJoltQuat(desc.yawRadians, desc.pitchRadians, desc.rollRadians);
+        BodyCreationSettings body_settings(shape, toRVec3(desc.center), q, EMotionType::Static, Layers::NON_MOVING);
+        body_settings.mRestitution = desc.material.restitution;
+        body_settings.mFriction = desc.material.friction;
+        body_settings.mUserData = packFilter(desc.filter);
+        body_settings.mEnhancedInternalEdgeRemoval = desc.enhancedInternalEdgeRemoval;
+        BodyInterface& iface = impl_->physics_system.GetBodyInterface();
+        Body* body = iface.CreateBody(body_settings);
+        if (body == nullptr) {
+            return kInvalidPhysicsBodyId;
+        }
+        iface.AddBody(body->GetID(), EActivation::DontActivate);
+        slots_.push_back(BodySlot{body->GetID(), true});
+        return static_cast<PhysicsBodyId>(slots_.size());
+    }
+
     PhysicsBodyId addStaticHeightField(PhysicsStaticHeightFieldDesc const& desc) override {
         if (desc.sampleCount < 2u ||
             desc.heights.size() != static_cast<std::size_t>(desc.sampleCount) * static_cast<std::size_t>(desc.sampleCount)) {
@@ -318,6 +537,7 @@ public:
         bs.mMotionQuality = EMotionQuality::LinearCast;
         bs.mAllowSleeping = sleepingEnabled_;
         bs.mUserData = packFilter(desc.filter);
+        bs.mEnhancedInternalEdgeRemoval = desc.enhancedInternalEdgeRemoval;
         BodyInterface& iface = impl_->physics_system.GetBodyInterface();
         BodyID const id = iface.CreateAndAddBody(bs, EActivation::Activate);
         if (id.IsInvalid()) {

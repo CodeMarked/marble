@@ -4,16 +4,11 @@
 #include "physics/RigidBodyDynamics.hpp"
 
 #include <cassert>
-#include <cmath>
 #include <cstdio>
 #include <memory>
 
 using namespace marble::physics;
 using marble::math::Vec3;
-
-static bool approxEq(float a, float b, float tol = 0.01f) {
-    return std::fabs(a - b) < tol;
-}
 
 static void testAddDynamicCapsule() {
     auto scene = createJoltPhysicsScene();
@@ -50,7 +45,7 @@ static void testCapsuleOnFloor() {
 
     PhysicsStaticBoxDesc floor{};
     floor.bounds = {{-10.f, -1.f, -10.f}, {10.f, 0.f, 10.f}};
-    scene->addStaticBox(floor);
+    assert(scene->addStaticBox(floor) != kInvalidPhysicsBodyId);
 
     PhysicsDynamicCapsuleDesc desc{};
     desc.center = {0.f, 2.f, 0.f};
@@ -82,7 +77,7 @@ static void testApplyLinearImpulse() {
 
     PhysicsStaticBoxDesc floor{};
     floor.bounds = {{-10.f, -1.f, -10.f}, {10.f, 0.f, 10.f}};
-    scene->addStaticBox(floor);
+    assert(scene->addStaticBox(floor) != kInvalidPhysicsBodyId);
 
     PhysicsDynamicCapsuleDesc desc{};
     desc.center = {0.f, 1.f, 0.f};

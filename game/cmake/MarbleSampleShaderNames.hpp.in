@@ -8,6 +8,9 @@
 
 namespace marble::game_shared {
 
+/// Same basename as `MARBLE_SAMPLE_MESH_SHADERS_PACK_BASENAME` in `game/CMakeLists.txt` (POST_BUILD `.marbpak`).
+inline constexpr std::string_view kMarbleSampleMeshShadersPackFileName = "@MARBLE_SAMPLE_MESH_SHADERS_PACK_BASENAME@";
+
 inline constexpr std::string_view kMarbleSampleShaderRegistryPaths[] = {
 @MARBLE_SAMPLE_SHADER_REGISTRY_PATHS_BODY@
 };

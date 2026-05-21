@@ -168,6 +168,10 @@ inline constexpr std::size_t kSessionStateCorrectionPayloadBytes = 40u;
     outFlags = readU8(in + 7u);
     outPayload = in + kSessionEnvelopeBytes;
     outPayloadLen = len - kSessionEnvelopeBytes;
+    if ((outFlags & kSessionEnvelopeFlag_Reliable) != 0u &&
+        len < kSessionEnvelopeBytes + kReliableHeaderBytes) {
+        return false;
+    }
     return true;
 }
 

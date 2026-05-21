@@ -1,6 +1,6 @@
 # Marble
 
-C++20 game project with a **Vulkan** rendering path and a small **runtime engine** (windowing, frame phases, logging, asset-root resolution). Much of what lives under `engine/` is **architecture and policy**—headers and tests that describe future systems (physics, audio, animation, networking, and similar)—and is **not** all wired into the shipped `marbles` demo yet.
+C++20 game project with a **Vulkan** rendering path and a small **runtime engine** (windowing, frame phases, logging, asset-root resolution). Much of what lives under `engine/` is **architecture and policy**—headers and tests that describe future systems (physics, audio, animation, networking, and similar)—and is **not** all wired into the shipped **Garden** sample (`garden` executable) yet.
 
 Long-term direction and **external C++ integrator** roadmap live under **`docs/`** when that tree is present (the default public clone often omits it per `.gitignore`); maintainers with a full checkout should read [`docs/ENGINE_ROADMAP.md`](docs/ENGINE_ROADMAP.md) and [`docs/architecture/sdk-and-samples-roadmap.md`](docs/architecture/sdk-and-samples-roadmap.md).
 
@@ -56,57 +56,59 @@ Engine, game, and tests inherit shared flags from [`cmake/MarbleCompileOptions.c
 
 ## Run
 
-- **Windows Debug:** `build\vs-debug\game\Debug\marbles.exe`
-- **Windows Release:** `build\vs-release\game\Release\marbles.exe`
-- **macOS / Linux (Ninja):** `./build/game/marbles` from the repo root (CMake stages `assets/` and `shaders/` next to this binary)
+- **Windows Debug:** `build\vs-debug\game\Debug\garden.exe` (same `assets/` / `shaders/` / `assets\sample_mesh_shaders.marbpak` staging as Ninja builds)
+- **Windows Release:** `build\vs-release\game\Release\garden.exe`
+- **macOS / Linux (Ninja):** `./build/game/garden` from the repo root (CMake stages `assets/` and `shaders/` next to this binary: loose SPIR-V under `assets/shaders/`, plus `assets/sample_mesh_shaders.marbpak` from **`marble_pack_v1`**; the sample still loads loose shaders first when both exist—[`docs/decisions/ADR-0024-runtime-resource-registry-and-lifetime-baseline.md`](docs/decisions/ADR-0024-runtime-resource-registry-and-lifetime-baseline.md) when your checkout includes `docs/`)
 
-On Windows run **`marbles.exe`** from those folders; on Unix run **`marbles`**. There is no separate `garden.exe`. The window title should start as **Marble - launcher**, then switch to **Marble - main menu** once the landing UI is up. If you never see the menu: you may be on an old binary (rebuild the **marbles** target), running **`--headless`** (that path goes straight into Marbles gameplay), or launching a different exe (for example a test) from Visual Studio.
+On Windows run **`garden.exe`** from those folders; on Unix run **`garden`**. The headless **dedicated server** is a separate binary: **`garden_server`** (see below). The window title should start as **Garden - launcher**, then switch to **Garden - main menu** once the landing UI is up. If you never see the menu: you may be on an old binary (rebuild the **`garden`** target), running **`--headless`** (that path goes straight into Marbles gameplay), or launching a different exe (for example a test) from Visual Studio.
 
 Optional: run without a window for a short time (good for quick checks):
 
 ```powershell
-build\vs-debug\game\Debug\marbles.exe --headless --frames 120
+build\vs-debug\game\Debug\garden.exe --headless --frames 120
 ```
 
 ```bash
-./build/game/marbles --headless --frames 120
+./build/game/garden --headless --frames 120
 ```
 
 Adjust diagnostics print cadence (seconds), or disable diagnostics entirely (`<= 0`):
 
 ```powershell
-build\vs-debug\game\Debug\marbles.exe --headless --frames 120 --diag-interval 0.5
+build\vs-debug\game\Debug\garden.exe --headless --frames 120 --diag-interval 0.5
 ```
 
 ```bash
-./build/game/marbles --headless --frames 120 --diag-interval 0.5
+./build/game/garden --headless --frames 120 --diag-interval 0.5
 ```
 
 On a machine with multiple Vulkan adapters, you can select the **n**th suitable device after the usual sorting (discrete GPUs are preferred before integrated):
 
 ```powershell
-build\vs-debug\game\Debug\marbles.exe --gpu 0
+build\vs-debug\game\Debug\garden.exe --gpu 0
 ```
 
 ```bash
-./build/game/marbles --gpu 0
+./build/game/garden --gpu 0
 ```
 
 With a resolved assets root (default when `assets/` is staged next to the executable), the demo loads mesh SPIR-V through the binary resource registry from **`assets/shaders/`**; otherwise it falls back to **`shaders/`** beside the executable. GLSL sources live under **`game/marbles/shaders/`**; CMake lists them in **`MARBLE_SHADER_GLSL_MODULES`**, compiles with **`glslc`**, and generates **`game/generated/MarbleSampleShaderNames.hpp`** (build tree) so C++ uses the same registry virtual paths and `.spv` basenames in list order (vertex, lit fragment, emissive fragment; see ADR-0057).
 
 ### Garden dedicated server (dev)
 
-Build the **`garden_server`** target with the same CMake preset as **`marbles`**. The headless server listens on **UDP** (default port **`27778`**).
+Build the **`garden_server`** target with the same CMake preset as **`garden`**. The headless server listens on **UDP** (default port **`27778`**).
 
 **Server CLI** (see `garden_server --help` / usage in [`game/garden_server/GardenServerMain.cpp`](game/garden_server/GardenServerMain.cpp)):
 
 - **`--port N`** — UDP port (default `27778`)
 - **`--seed S`** — layout seed (default matches [`kGardenDedicatedServerDefaultLayoutSeed`](game/garden/GardenSimulation.hpp) = `42`)
 - **`--max-players N`**
-- **`--aoi-radius R`** — AOI radius (omit **`--no-aoi`** for interest filtering)
-- **`--no-aoi`** — full snapshots to every peer
+- **`--aoi`** — enable area-of-interest filtering (default is off for the small garden roster)
+- **`--aoi-radius R`** — AOI radius when **`--aoi`** is set (default `2500`)
+- **`--no-aoi`** — explicitly disable AOI (default)
+- **Full snapshots:** the dedicated server calls [`AuthoritativeSession::setFullSnapshotWhenActiveEntityCountAtMost`](engine/gameplay/AuthoritativeSession.hpp) with the garden marble cap so every snapshot includes **all** active marbles even if AOI is on (avoids client interpolator stalls when entities drop in/out of the interest set).
 
-**Clients:** run **`marbles`**, choose **Garden – join server** from the menu (defaults target `127.0.0.1:27778`), or launch non-interactively with **`--join <host>`** and optional **`--join-port`**, **`--join-seed`** (match the server **`--seed`** so the local layout lines up with replicated state; default join seed is already `42`). **Two players:** start two **`marbles`** instances with the same host/port (localhost or LAN).
+**Clients:** run **`garden`**, choose **Garden – join server** from the menu (defaults target `127.0.0.1:27778`), or launch non-interactively with **`--join <host>`** and optional **`--join-port`**, **`--join-seed`** (match the server **`--seed`** so the local layout lines up with replicated state; default join seed is already `42`). **Two players:** start two **`garden`** instances with the same host/port (localhost or LAN).
 
 ## Test
 
@@ -141,7 +143,7 @@ If you are not using CMake presets:
 powershell -ExecutionPolicy Bypass -File .\scripts\dev-loop.ps1
 ```
 
-Watches source, rebuilds, and restarts `marbles.exe`. If Release rebuild fails because `marbles.exe` is locked, close the app or: `Get-Process marbles -ErrorAction SilentlyContinue | Stop-Process -Force`
+Watches source, rebuilds, and restarts `garden.exe`. If Release rebuild fails because `garden.exe` is locked, close the app or: `Get-Process garden -ErrorAction SilentlyContinue | Stop-Process -Force`
 
 ## Preflight workflow
 

@@ -9,8 +9,8 @@
 #include "gameplay/UdpGameTransport.hpp"
 #include "physics/IPhysicsScene.hpp"
 #include "physics/MiddlewarePhysicsTypes.hpp"
-#include "physics/PhysicsWorld.hpp"
 #include "physics/RigidBodyDynamics.hpp"
+#include "platform/cli/CmdlineU.hpp"
 
 #include <algorithm>
 #include <array>
@@ -30,7 +30,6 @@ namespace {
 using namespace marble::gameplay;
 using marble::physics::PhysicsBodyId;
 using marble::physics::PhysicsDynamicSphereDesc;
-using marble::physics::PhysicsWorldSettings;
 using marble::physics::RigidBodyKinematics;
 using marble::physics::createJoltPhysicsScene;
 
@@ -48,28 +47,15 @@ inline constexpr std::uint16_t kDefaultMaxPlayers = 4u;
 [[nodiscard]] int usage() {
     std::fprintf(stderr,
         "garden_server — Marble headless dedicated garden server\n"
-        "  garden_server [--port N] [--seed S] [--max-players N] [--snapshot-hz N] [--aoi-radius R] [--no-aoi]\n"
+        "  garden_server [--port N] [--seed S] [--max-players N] [--snapshot-hz N] [--aoi] [--aoi-radius R] [--no-aoi]\n"
         "                [--aoi-lookahead SEC] [--aoi-viewer-lookahead SEC] [--snapshot-max-bytes N]\n"
         "                [--join-token V]  (decimal or 0x hex; or env GARDEN_SERVER_JOIN_TOKEN)\n"
-        "  Defaults: port %u, seed %u, max-players %u, snapshot-hz 20 (must divide sim 60 Hz; AOI on; snapshot bytes 1400)\n",
+        "  Defaults: port %u, seed %u, max-players %u, snapshot-hz 20 (must divide sim 60 Hz; AOI off; snapshot bytes 1400)\n",
         static_cast<unsigned>(kDefaultPort),
         static_cast<unsigned>(kDefaultSeed),
         static_cast<unsigned>(kDefaultMaxPlayers)
     );
     return 2;
-}
-
-[[nodiscard]] bool parseU16(char const* s, std::uint16_t& out) {
-    if (s == nullptr || s[0] == '\0') {
-        return false;
-    }
-    char* end{};
-    unsigned long const v = std::strtoul(s, &end, 10);
-    if (end == s || *end != '\0' || v > 65535ul) {
-        return false;
-    }
-    out = static_cast<std::uint16_t>(v);
-    return true;
 }
 
 [[nodiscard]] bool parseF32(char const* s, float& out) {
@@ -131,7 +117,7 @@ int main(int argc, char** argv) {
     std::uint32_t seed = kDefaultSeed;
     std::uint16_t maxPlayers = kDefaultMaxPlayers;
     float aoiRadius = 2500.f;
-    bool useAoi = true;
+    bool useAoi = false;
     float aoiEntityLookaheadSec = 0.5f;
     float aoiViewerLookaheadSec = 0.f;
     std::uint32_t snapshotMaxBytes = 1400u;
@@ -141,7 +127,7 @@ int main(int argc, char** argv) {
 
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--port") == 0 && (i + 1) < argc) {
-            if (!parseU16(argv[++i], port)) {
+            if (!marble::platform::cli::parseU16(argv[++i], port)) {
                 return usage();
             }
             continue;
@@ -155,7 +141,7 @@ int main(int argc, char** argv) {
             continue;
         }
         if (std::strcmp(argv[i], "--max-players") == 0 && (i + 1) < argc) {
-            if (!parseU16(argv[++i], maxPlayers) || maxPlayers < 2u) {
+            if (!marble::platform::cli::parseU16(argv[++i], maxPlayers) || maxPlayers < 2u) {
                 return usage();
             }
             continue;
@@ -164,6 +150,10 @@ int main(int argc, char** argv) {
             if (!parseF32(argv[++i], aoiRadius)) {
                 return usage();
             }
+            continue;
+        }
+        if (std::strcmp(argv[i], "--aoi") == 0) {
+            useAoi = true;
             continue;
         }
         if (std::strcmp(argv[i], "--no-aoi") == 0) {
@@ -189,7 +179,7 @@ int main(int argc, char** argv) {
             continue;
         }
         if (std::strcmp(argv[i], "--snapshot-hz") == 0 && (i + 1) < argc) {
-            if (!parseU16(argv[++i], snapshotHz) || snapshotHz < 1u || snapshotHz > 60u) {
+            if (!marble::platform::cli::parseU16(argv[++i], snapshotHz) || snapshotHz < 1u || snapshotHz > 60u) {
                 return usage();
             }
             continue;
@@ -259,6 +249,7 @@ int main(int argc, char** argv) {
         desc.material.friction = 0.42f;
         desc.material.linearDamping = 0.02f;
         desc.material.angularDamping = 0.10f;
+        desc.enhancedInternalEdgeRemoval = true;
         marbleBodyIds[i] = physicsScene->addDynamicSphere(desc);
     }
 
@@ -320,17 +311,17 @@ int main(int argc, char** argv) {
         "garden_server: max_snapshot_bytes_per_peer=%u (0=unlimited)\n",
         static_cast<unsigned>(snapshotMaxBytes));
 
+    session.setFullSnapshotWhenActiveEntityCountAtMost(
+        static_cast<std::uint32_t>(marble::garden::kMaxGardenAuthorityMarbles));
+    std::fprintf(stderr,
+        "garden_server: full kinematic snapshot when active entities <= %u (garden roster)\n",
+        static_cast<unsigned>(marble::garden::kMaxGardenAuthorityMarbles));
+
     auto const bootTime = std::chrono::steady_clock::now();
     std::fprintf(stderr, "garden_server: waiting for first client (session ready, send Hello)...\n");
 
-    PhysicsWorldSettings worldSettings{};
-    worldSettings.gravity = {0.f, -9.81f, 0.f};
-    // Small dynamic count; sleeping bodies can ignore host-applied impulses until re-activated — keep pods awake.
-    worldSettings.enableSleeping = false;
-    worldSettings.enableContinuousCollision = true;
-    worldSettings.maxSubSteps = 1u;
+    marble::physics::PhysicsWorldSettings const worldSettings = marble::garden::gardenAuthorityPhysicsWorldSettings();
 
-    constexpr float kFixedDt = 1.f / 60.f;
     auto lastTime = std::chrono::steady_clock::now();
     float accumulator = 0.f;
     std::uint64_t totalTicks = 0u;
@@ -344,13 +335,13 @@ int main(int argc, char** argv) {
         lastTime = now;
 
         accumulator += dt;
-        while (accumulator >= kFixedDt) {
-            accumulator -= kFixedDt;
+        while (accumulator >= marble::garden::kGardenAuthorityFixedDeltaSeconds) {
+            accumulator -= marble::garden::kGardenAuthorityFixedDeltaSeconds;
 
             marble::garden::gardenAuthorityFixedStep(
                 marble::garden::GardenAuthorityRunMode::Dedicated,
                 session,
-                kFixedDt,
+                marble::garden::kGardenAuthorityFixedDeltaSeconds,
                 useAoi,
                 *physicsScene,
                 layout,

@@ -9,8 +9,7 @@
 #include "render/DrawFlags.hpp"
 #include "render/IRenderBackend.hpp"
 #include "render/vulkan/VulkanRhi.hpp"
-#include "shared/LoadMeshSampleSpirv.hpp"
-#include "shared/SampleMeshShaderResources.hpp"
+#include "shared/InitSampleMeshVulkanRhi.hpp"
 #include "ui/EasyFontMesh.hpp"
 #include "ui/NdcRect.hpp"
 
@@ -345,36 +344,15 @@ public:
         if (!engine_.window()) {
             return false;
         }
-        bool vkOk = false;
-        std::string const assetsRoot = engine_.assetsRootPath();
-        if (!assetsRoot.empty()) {
-            (void)marble::core::setBinaryResourceSearchRoot(state_->assetRegistry_, std::filesystem::path(assetsRoot));
-            if (marble::game_shared::acquireAllSampleMeshRegistryShaders(state_->assetRegistry_)) {
-                std::span<std::uint8_t const> vspan;
-                std::span<std::uint8_t const> fspan;
-                std::span<std::uint8_t const> espan;
-                if (marble::game_shared::sampleMeshRegistrySpirvSpansForInit(
-                        state_->assetRegistry_, vspan, fspan, espan)) {
-                    vkOk = state_->rhi.initFromSpirvBytes(
-                        *engine_.window(), "Marble", vspan, fspan, physicalDeviceIndex_, espan);
-                }
-            }
-        }
-        if (!vkOk) {
-            std::vector<std::uint8_t> vertDisk;
-            std::vector<std::uint8_t> fragDisk;
-            std::vector<std::uint8_t> emDisk;
-            if (!marble::game_shared::loadSampleMeshSpirvFromShaderDirectory(
-                    std::filesystem::path(shaderDirectory_), vertDisk, fragDisk, emDisk) ||
-                !state_->rhi.initFromSpirvBytes(
-                    *engine_.window(),
-                    "Marble",
-                    std::span(vertDisk.data(), vertDisk.size()),
-                    std::span(fragDisk.data(), fragDisk.size()),
-                    physicalDeviceIndex_,
-                    std::span(emDisk.data(), emDisk.size()))) {
-                return false;
-            }
+        if (!marble::game_shared::initSampleMeshVulkanRhiFromAssetsOrShaderDirectory(
+                *engine_.window(),
+                state_->rhi,
+                state_->assetRegistry_,
+                engine_.assetsRootPath(),
+                std::filesystem::path(shaderDirectory_),
+                "Marble",
+                physicalDeviceIndex_)) {
+            return false;
         }
         IRenderBackend& rb = state_->rhi;
         rb.setClearColor(0.04f, 0.06f, 0.1f, 1.f);

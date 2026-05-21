@@ -2,26 +2,30 @@
 
 #include "garden/GardenMarblePlayer.hpp"
 #include "garden/GardenSimulation.hpp"
+#include "gameplay/MultiplayerWireFormat.hpp"
 #include "gameplay/SimulationIsland.hpp"
 #include "physics/IPhysicsScene.hpp"
 #include "physics/MiddlewarePhysicsTypes.hpp"
 #include "physics/PhysicsWorld.hpp"
 #include "physics/RigidBodyDynamics.hpp"
+#include "math/Vec3.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 
 namespace marble::garden {
 
 using marble::gameplay::PeerId;
+using marble::gameplay::PhysicsSimulationTier;
 using marble::gameplay::SimulationIsland;
 using marble::physics::IPhysicsScene;
 using marble::physics::PhysicsBodyId;
 using marble::physics::PhysicsCylindricalXZClamp;
+using marble::physics::PhysicsBodyMaterial;
 using marble::physics::PhysicsDynamicSphereDesc;
-using marble::physics::PhysicsStaticBoxDesc;
 using marble::physics::PhysicsStaticHeightFieldDesc;
 using marble::physics::PhysicsStepOptions;
 using marble::physics::PhysicsWorldSettings;
@@ -59,9 +63,37 @@ void fillGardenServerMarbleSpawnStates(std::span<RigidBodyKinematics> marbles, G
         float const r = kArenaRadius * 0.55f;
         float const x = std::cos(t) * r;
         float const z = std::sin(t) * r;
-        float const y = gardenTerrainHeightAt(layout.terrain, x, z) + kMarbleRadius + 0.12f;
+        float const y =
+            gardenTerrainHeightAt(layout.terrain, x, z) + kMarbleRadius + kGardenMarbleSpawnClearanceAboveTerrainM;
         marbles[i] = RigidBodyKinematics{{x, y, z}, {}, invMass};
     }
+}
+
+PhysicsSimulationTier gardenMarbleReplicationTier(
+    std::size_t slot,
+    std::span<RigidBodyKinematics const> marbles,
+    std::size_t marbleCount) noexcept {
+    if (marbleCount <= 1u || slot >= marbleCount) {
+        return PhysicsSimulationTier::Contact;
+    }
+    marble::math::Vec3 const p = marbles[slot].position;
+    float minD2 = std::numeric_limits<float>::infinity();
+    for (std::size_t j = 0u; j < marbleCount; ++j) {
+        if (j == slot) {
+            continue;
+        }
+        marble::math::Vec3 const d = marbles[j].position - p;
+        float const d2 = d.x * d.x + d.y * d.y + d.z * d.z;
+        if (d2 < minD2) {
+            minD2 = d2;
+        }
+    }
+    if (!std::isfinite(minD2)) {
+        return PhysicsSimulationTier::Contact;
+    }
+    float const minDist = std::sqrt(minD2);
+    return minDist > kGardenNetSimNearOtherMarbleM ? PhysicsSimulationTier::CruiseOrbit
+                                                   : PhysicsSimulationTier::Contact;
 }
 
 void gardenAuthorityPopulateStaticCollidersFromLayout(
@@ -78,13 +110,10 @@ void gardenAuthorityPopulateStaticCollidersFromLayout(
     hfDesc.material.friction = 0.7f;
     static_cast<void>(scene.addStaticHeightField(hfDesc));
 
-    for (std::size_t i = 0u; i < layout.staticColliders.size(); ++i) {
-        PhysicsStaticBoxDesc boxDesc{};
-        boxDesc.bounds = localGameplayAabbToJolt(island, layout.staticColliders[i]);
-        boxDesc.material.restitution = 0.25f;
-        boxDesc.material.friction = 0.6f;
-        static_cast<void>(scene.addStaticBox(boxDesc));
-    }
+    PhysicsBodyMaterial propMat{};
+    propMat.restitution = 0.25f;
+    propMat.friction = 0.6f;
+    gardenAddStaticPropBodiesFromLayout(scene, layout, island, propMat);
 }
 
 void gardenAuthorityFixedStep(
@@ -171,12 +200,14 @@ void gardenAuthorityFixedStep(
     physicsScene.readBackKinematics(bodySpan, marbles.data(), marbleCount);
 
     for (std::size_t i = 0u; i < marbleCount; ++i) {
+        PhysicsSimulationTier const tier =
+            gardenMarbleReplicationTier(i, std::span<RigidBodyKinematics const>(marbles.data(), marbleCount), marbleCount);
         static_cast<void>(session.setEntity(
             i,
             marble::gameplay::WorldObjectRef{static_cast<std::uint64_t>(0x1000u + i)},
             marbles[i].position,
             marbles[i].linearVelocity,
-            marble::gameplay::PhysicsSimulationTier::Contact,
+            tier,
             0.f
         ));
     }

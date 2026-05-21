@@ -1,11 +1,11 @@
 // Two identical fixed-step runs over a garden dynamic sphere + shared marble input step; positions must match
 // bit-for-bit on one host (mirrors `garden_server` + `applyGardenMarblePlayerStep`).
 
+#include "garden/GardenAuthorityTick.hpp"
 #include "garden/GardenMarblePlayer.hpp"
 #include "garden/GardenSimulation.hpp"
 #include "physics/IPhysicsScene.hpp"
 #include "physics/MiddlewarePhysicsTypes.hpp"
-#include "physics/PhysicsWorld.hpp"
 #include "physics/RigidBodyDynamics.hpp"
 
 #include "gameplay/SimulationIsland.hpp"
@@ -50,15 +50,12 @@ namespace {
     desc.material.friction = 0.42f;
     desc.material.linearDamping = 0.02f;
     desc.material.angularDamping = 0.10f;
+    desc.enhancedInternalEdgeRemoval = true;
     PhysicsBodyId const body = physicsScene->addDynamicSphere(desc);
     assert(body != kInvalidPhysicsBodyId);
     physicsScene->optimizeBroadPhase();
 
-    PhysicsWorldSettings worldSettings{};
-    worldSettings.gravity = {0.f, -9.81f, 0.f};
-    worldSettings.enableSleeping = false;
-    worldSettings.enableContinuousCollision = true;
-    worldSettings.maxSubSteps = 1u;
+    PhysicsWorldSettings const worldSettings = marble::garden::gardenAuthorityPhysicsWorldSettings();
 
     constexpr float kDt = 1.f / 60.f;
     bool jumpWasHeld = false;

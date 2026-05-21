@@ -32,7 +32,7 @@ function Configure-And-Build {
 }
 
 function Start-App {
-    $exePath = Join-Path $ProjectRoot "build\vs-$Preset\game\$Preset\marbles.exe"
+    $exePath = Join-Path $ProjectRoot "build\vs-$Preset\game\$Preset\garden.exe"
     if (-not (Test-Path $exePath)) {
         Write-Host "Executable not found at $exePath"
         return $null

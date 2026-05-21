@@ -1,6 +1,8 @@
 # --- CMake / Ninja / presets ---
 # Presets use ${sourceDir}/build/vs-<presetName> (see CMakePresets.json).
 build/
+build-agent/
+build-plan/
 out/
 cmake-build-*/
 
@@ -32,6 +34,7 @@ compile_commands.json
 
 # --- Local logs and scratch output ---
 *.log
+Testing/
 
 # Optional documentation / notes alongside the tree
 docs/

@@ -20,10 +20,10 @@ int main(int argc, char** argv)
 
     constexpr LogChannelMask kGeneral = static_cast<LogChannelMask>(LogChannel::General);
 
-    (void)logPrintf(0, kGeneral, "Marble: unified launcher (windowed = main menu; --headless skips menu)");
+    (void)logPrintf(0, kGeneral, "Garden sample: launcher (windowed = main menu; --headless skips menu)");
 
     marble::core::Engine::Config config {};
-    config.appName = "Marble - launcher";
+    config.appName = "Garden - launcher";
     config.resolveAssetsRoot = true;
     std::optional<std::uint32_t> physicalDeviceIndex;
     std::string joinHost;

@@ -4,6 +4,7 @@
 #include "core/Simulation.hpp"
 #include "input/PlatformGamepadBridge.hpp"
 #include "input/PlatformKeyboardBridge.hpp"
+#include "math/CameraLhVulkan.hpp"
 #include "math/Geometry.hpp"
 #include "math/Mat4.hpp"
 #include "math/Vec3.hpp"
@@ -11,11 +12,11 @@
 #include "platform/window/Window.hpp"
 #include "render/DrawFlags.hpp"
 #include "render/IRenderBackend.hpp"
+#include "render/ProceduralMeshVulkan.hpp"
 #include "render/MaterialId.hpp"
 #include "render/RenderTypes.hpp"
 #include "render/vulkan/VulkanRhi.hpp"
-#include "shared/LoadMeshSampleSpirv.hpp"
-#include "shared/SampleMeshShaderResources.hpp"
+#include "shared/InitSampleMeshVulkanRhi.hpp"
 #include "shared/PauseMenuInput.hpp"
 
 #include <algorithm>
@@ -99,141 +100,6 @@ static constexpr ActionContextEntry kVictoryContext[] = {
 
 [[nodiscard]] Mat4 boardMatrix(float pitch, float roll) noexcept {
     return Mat4::rotationX(pitch) * Mat4::rotationZ(roll);
-}
-
-[[nodiscard]] Mat4 lookAtLh(Vec3 const& eye, Vec3 const& target, Vec3 const& worldUp) noexcept {
-    Vec3 const f = marble::math::normalize(target - eye);
-    Vec3 mutUp = worldUp;
-    Vec3 r = marble::math::cross(mutUp, f);
-    if (marble::math::lengthSquared(r) < 1e-8f) {
-        mutUp = Vec3::unitX();
-        r = marble::math::cross(mutUp, f);
-    }
-    r = marble::math::normalize(r);
-    Vec3 const u = marble::math::cross(f, r);
-    Mat4 m{};
-    // Column basis [right, up, -forward]: projection uses w = -z_view so in-front geometry has z_view < 0.
-    m.m[0] = r.x;
-    m.m[1] = u.x;
-    m.m[2] = -f.x;
-    m.m[3] = 0.f;
-    m.m[4] = r.y;
-    m.m[5] = u.y;
-    m.m[6] = -f.y;
-    m.m[7] = 0.f;
-    m.m[8] = r.z;
-    m.m[9] = u.z;
-    m.m[10] = -f.z;
-    m.m[11] = 0.f;
-    m.m[12] = -marble::math::dot(r, eye);
-    m.m[13] = -marble::math::dot(u, eye);
-    m.m[14] = marble::math::dot(f, eye);
-    m.m[15] = 1.f;
-    return m;
-}
-
-[[nodiscard]] Mat4 perspectiveVulkan(float fovyRad, float aspect, float n, float f) noexcept {
-    float const t = std::tan(fovyRad * 0.5f);
-    if (t <= 1e-8f) {
-        return Mat4::identity();
-    }
-    float const invT = 1.f / t;
-    Mat4 p{};
-    p.m[0] = invT / aspect;
-    p.m[5] = invT;
-    p.m[10] = f / (n - f);
-    p.m[11] = -1.f;
-    p.m[14] = (n * f) / (n - f);
-    return p;
-}
-
-void addCube(std::vector<VulkanRhi::Vertex>& vtx, std::vector<std::uint32_t>& idx, Vec3 color) {
-    auto face = [&](Vec3 n, Vec3 t0, Vec3 t1, Vec3 t2, Vec3 t3) {
-        std::uint32_t base = static_cast<std::uint32_t>(vtx.size());
-        auto push = [&](Vec3 p) {
-            VulkanRhi::Vertex v{};
-            v.px = p.x;
-            v.py = p.y;
-            v.pz = p.z;
-            v.nx = n.x;
-            v.ny = n.y;
-            v.nz = n.z;
-            v.cr = color.x;
-            v.cg = color.y;
-            v.cb = color.z;
-            vtx.push_back(v);
-        };
-        push(t0);
-        push(t1);
-        push(t2);
-        push(t3);
-        idx.push_back(base);
-        idx.push_back(base + 1);
-        idx.push_back(base + 2);
-        idx.push_back(base + 2);
-        idx.push_back(base + 3);
-        idx.push_back(base);
-    };
-    float const h = 0.5f;
-    face({1.f, 0.f, 0.f}, {h, -h, h}, {h, -h, -h}, {h, h, -h}, {h, h, h});
-    face({-1.f, 0.f, 0.f}, {-h, -h, -h}, {-h, -h, h}, {-h, h, h}, {-h, h, -h});
-    face({0.f, 1.f, 0.f}, {-h, h, h}, {h, h, h}, {h, h, -h}, {-h, h, -h});
-    face({0.f, -1.f, 0.f}, {-h, -h, -h}, {h, -h, -h}, {h, -h, h}, {-h, -h, h});
-    face({0.f, 0.f, 1.f}, {-h, -h, h}, {h, -h, h}, {h, h, h}, {-h, h, h});
-    face({0.f, 0.f, -1.f}, {h, -h, -h}, {-h, -h, -h}, {-h, h, -h}, {h, h, -h});
-}
-
-void addUvSphere(
-    std::vector<VulkanRhi::Vertex>& vtx,
-    std::vector<std::uint32_t>& idx,
-    float radius,
-    int stacks,
-    int slices,
-    Vec3 color
-) {
-    if (stacks < 2 || slices < 3) {
-        return;
-    }
-    std::uint32_t base = static_cast<std::uint32_t>(vtx.size());
-    for (int i = 0; i <= stacks; ++i) {
-        float const v = static_cast<float>(i) / static_cast<float>(stacks);
-        float const phi = v * 3.14159265f;
-        float const sp = std::sin(phi);
-        float const cp = std::cos(phi);
-        for (int j = 0; j <= slices; ++j) {
-            float const u = static_cast<float>(j) / static_cast<float>(slices);
-            float const theta = u * 2.f * 3.14159265f;
-            float const st = std::sin(theta);
-            float const ct = std::cos(theta);
-            float const nx = ct * sp;
-            float const ny = cp;
-            float const nz = st * sp;
-            VulkanRhi::Vertex vert{};
-            vert.px = nx * radius;
-            vert.py = ny * radius;
-            vert.pz = nz * radius;
-            vert.nx = nx;
-            vert.ny = ny;
-            vert.nz = nz;
-            vert.cr = color.x;
-            vert.cg = color.y;
-            vert.cb = color.z;
-            vtx.push_back(vert);
-        }
-    }
-    int const stride = slices + 1;
-    for (int i = 0; i < stacks; ++i) {
-        for (int j = 0; j < slices; ++j) {
-            int const a = base + i * stride + j;
-            int const b = base + (i + 1) * stride + j;
-            idx.push_back(static_cast<std::uint32_t>(a));
-            idx.push_back(static_cast<std::uint32_t>(b));
-            idx.push_back(static_cast<std::uint32_t>(a + 1));
-            idx.push_back(static_cast<std::uint32_t>(a + 1));
-            idx.push_back(static_cast<std::uint32_t>(b));
-            idx.push_back(static_cast<std::uint32_t>(b + 1));
-        }
-    }
 }
 
 [[nodiscard]] bool resolveSphereAabb(Vec3& pos, Vec3& vel, float r, Aabb const& box, float restitution) noexcept {
@@ -602,8 +468,8 @@ struct MarblesGame::State final {
         Vec3 const camTarget = marbleWorld;
         Vec3 camPos{marbleWorld.x - 5.f, marbleWorld.y + 4.f, marbleWorld.z - 5.f};
         cameraSmoothT = std::min(1.f, cameraSmoothT + 0.05f);
-        Mat4 const view = lookAtLh(camPos, camTarget, Vec3::unitY());
-        Mat4 const proj = perspectiveVulkan(60.f * 3.14159265f / 180.f, aspect, 0.1f, 80.f);
+        Mat4 const view = marble::math::lookAtLh(camPos, camTarget, Vec3::unitY());
+        Mat4 const proj = marble::math::perspectiveVulkan(60.f * 3.14159265f / 180.f, aspect, 0.1f, 80.f);
         Mat4 const viewProj = proj * view;
 
         drawScratch.clear();
@@ -715,43 +581,22 @@ bool MarblesGame::initGraphics(std::string shaderDirectory, std::optional<std::u
     if (!engine_.window()) {
         return false;
     }
-    bool vkOk = false;
-    std::string const assetsRoot = engine_.assetsRootPath();
-    if (!assetsRoot.empty()) {
-        (void)marble::core::setBinaryResourceSearchRoot(state_->assetRegistry_, std::filesystem::path(assetsRoot));
-        // ResourceKind::ShaderBytecode — virtual paths from generated `MarbleSampleShaderNames.hpp`.
-        if (marble::game_shared::acquireAllSampleMeshRegistryShaders(state_->assetRegistry_)) {
-            std::span<std::uint8_t const> vspan;
-            std::span<std::uint8_t const> fspan;
-            std::span<std::uint8_t const> espan;
-            if (marble::game_shared::sampleMeshRegistrySpirvSpansForInit(state_->assetRegistry_, vspan, fspan, espan)) {
-                vkOk = state_->rhi.initFromSpirvBytes(
-                    *engine_.window(), "Marbles", vspan, fspan, physicalDeviceIndex, espan);
-            }
-        }
-    }
-    if (!vkOk) {
-        std::vector<std::uint8_t> vertDisk;
-        std::vector<std::uint8_t> fragDisk;
-        std::vector<std::uint8_t> emDisk;
-        if (!marble::game_shared::loadSampleMeshSpirvFromShaderDirectory(
-                std::filesystem::path(shaderDirectory), vertDisk, fragDisk, emDisk) ||
-            !state_->rhi.initFromSpirvBytes(
-                *engine_.window(),
-                "Marbles",
-                std::span(vertDisk.data(), vertDisk.size()),
-                std::span(fragDisk.data(), fragDisk.size()),
-                physicalDeviceIndex,
-                std::span(emDisk.data(), emDisk.size()))) {
-            return false;
-        }
+    if (!marble::game_shared::initSampleMeshVulkanRhiFromAssetsOrShaderDirectory(
+            *engine_.window(),
+            state_->rhi,
+            state_->assetRegistry_,
+            engine_.assetsRootPath(),
+            std::filesystem::path(shaderDirectory),
+            "Marbles",
+            physicalDeviceIndex)) {
+        return false;
     }
     IRenderBackend& renderBackend = state_->rhi;
     renderBackend.setClearColor(0.06f, 0.07f, 0.1f, 1.f);
 
     std::vector<VulkanRhi::Vertex> cv;
     std::vector<std::uint32_t> ci;
-    addCube(cv, ci, {1.f, 1.f, 1.f});
+    marble::render::addCube(cv, ci, {1.f, 1.f, 1.f});
     state_->meshCube = state_->rhi.uploadMesh(cv, ci);
     if (state_->meshCube == std::numeric_limits<std::uint32_t>::max()) {
         return false;
@@ -759,7 +604,7 @@ bool MarblesGame::initGraphics(std::string shaderDirectory, std::optional<std::u
 
     std::vector<VulkanRhi::Vertex> sv;
     std::vector<std::uint32_t> si;
-    addUvSphere(sv, si, 1.f, 16, 24, {1.f, 1.f, 1.f});
+    marble::render::addUvSphere(sv, si, 1.f, 16, 24, {1.f, 1.f, 1.f});
     state_->meshSphere = state_->rhi.uploadMesh(sv, si);
     if (state_->meshSphere == std::numeric_limits<std::uint32_t>::max()) {
         return false;

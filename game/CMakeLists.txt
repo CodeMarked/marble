@@ -32,13 +32,15 @@ set(MARBLE_GLSLC_EXTRA_FLAGS "" CACHE STRING "Extra glslc args for sample shader
 
 set(MARBLE_SHADER_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/marbles/shaders)
 
-set(MARBLE_SHADER_SPV_DIR ${CMAKE_CURRENT_BINARY_DIR}/marbles_shaders)
+set(MARBLE_SHADER_SPV_DIR ${CMAKE_CURRENT_BINARY_DIR}/garden_shaders)
 
 file(MAKE_DIRECTORY ${MARBLE_SHADER_SPV_DIR})
 
 include(FetchContent)
 
 set(MARBLE_SHADER_GLSL_MODULES mesh.vert mesh.frag mesh_emissive.frag)
+
+set(MARBLE_SAMPLE_MESH_SHADERS_PACK_BASENAME "sample_mesh_shaders.marbpak")
 
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
 
@@ -82,7 +84,7 @@ endforeach()
 
 
 
-add_custom_target(marbles_shaders DEPENDS ${MARBLE_SHADER_SPVS})
+add_custom_target(garden_shaders DEPENDS ${MARBLE_SHADER_SPVS})
 
 
 
@@ -116,11 +118,11 @@ PUBLIC
 
 
 
-add_executable(marbles)
+add_executable(garden)
 
 
 
-target_include_directories(marbles
+target_include_directories(garden
 
 PRIVATE
 
@@ -132,7 +134,7 @@ PRIVATE
 
 
 
-target_sources(marbles
+target_sources(garden
 
 PRIVATE
 
@@ -144,19 +146,31 @@ PRIVATE
 
     garden/GardenGame.cpp
 
+    garden/GardenGameHelpers.cpp
+
+    garden/GardenGameStateNetPhysics.cpp
+
+    garden/GardenGameStateStep.cpp
+
+    garden/GardenGameStateRender.cpp
+
+    garden/GardenRemotePresentation.cpp
+
 )
 
 
 
-add_dependencies(marbles marbles_shaders)
+add_dependencies(garden garden_shaders)
+
+add_dependencies(garden marble_pack_v1)
+
+add_dependencies(garden marble_mesh_v1)
 
 
 
-target_link_libraries(marbles
+target_link_libraries(garden
 
 PRIVATE
-
-    engine
 
     garden_sim
 
@@ -166,7 +180,7 @@ PRIVATE
 
 add_custom_command(
 
-    TARGET marbles
+    TARGET garden
 
     POST_BUILD
 
@@ -174,9 +188,9 @@ add_custom_command(
 
             ${MARBLE_SHADER_SPV_DIR}
 
-            $<TARGET_FILE_DIR:marbles>/shaders
+            $<TARGET_FILE_DIR:garden>/shaders
 
-    COMMENT "Stage SPIR-V shaders next to marbles"
+    COMMENT "Stage SPIR-V shaders next to garden"
 
     VERBATIM
 
@@ -186,7 +200,7 @@ add_custom_command(
 
 add_custom_command(
 
-    TARGET marbles
+    TARGET garden
 
     POST_BUILD
 
@@ -194,9 +208,9 @@ add_custom_command(
 
             ${CMAKE_SOURCE_DIR}/assets
 
-            $<TARGET_FILE_DIR:marbles>/assets
+            $<TARGET_FILE_DIR:garden>/assets
 
-    COMMENT "Stage runtime assets next to marbles"
+    COMMENT "Stage runtime assets next to garden"
 
     VERBATIM
 
@@ -206,17 +220,17 @@ add_custom_command(
 
 add_custom_command(
 
-    TARGET marbles
+    TARGET garden
 
     POST_BUILD
 
-    COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:marbles>/assets/shaders
+    COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:garden>/assets/shaders
 
     COMMAND ${CMAKE_COMMAND} -E copy_directory
 
             ${MARBLE_SHADER_SPV_DIR}
 
-            $<TARGET_FILE_DIR:marbles>/assets/shaders
+            $<TARGET_FILE_DIR:garden>/assets/shaders
 
     COMMENT "Stage SPIR-V under assets/shaders for BinaryResourceManager"
 
@@ -224,18 +238,29 @@ add_custom_command(
 
 )
 
-add_executable(mp_foundation
-    mp_foundation/MpFoundationMain.cpp
+set(MARBLE_SAMPLE_MESH_SHADER_PACK_CMD
+    $<TARGET_FILE:marble_pack_v1>
+    $<TARGET_FILE_DIR:garden>/assets/${MARBLE_SAMPLE_MESH_SHADERS_PACK_BASENAME}
 )
 
-target_include_directories(mp_foundation
-PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}
-)
+foreach(_marble_pack_shader ${MARBLE_SHADER_GLSL_MODULES})
 
-target_link_libraries(mp_foundation
-PRIVATE
-    engine
+    list(APPEND MARBLE_SAMPLE_MESH_SHADER_PACK_CMD "shaders/${_marble_pack_shader}.spv" "${MARBLE_SHADER_SPV_DIR}/${_marble_pack_shader}.spv")
+
+endforeach()
+
+add_custom_command(
+
+    TARGET garden
+
+    POST_BUILD
+
+    COMMAND ${MARBLE_SAMPLE_MESH_SHADER_PACK_CMD}
+
+    COMMENT "Build sample_mesh_shaders.marbpak (MARBPK01) beside garden"
+
+    VERBATIM
+
 )
 
 add_executable(garden_server
@@ -249,7 +274,10 @@ PRIVATE
 
 target_link_libraries(garden_server
 PRIVATE
-    engine
     garden_sim
 )
+
+if(TARGET marble_pack_v1)
+    add_dependencies(marble_pack_v1 garden_shaders)
+endif()
 

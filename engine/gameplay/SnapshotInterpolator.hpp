@@ -30,6 +30,9 @@ struct InterpolatedEntity {
 ///
 /// Operates in **server simTick** coordinates. Callers pass a `float` render tick
 /// (fractional allowed) from wall-clock mapping or `static_cast<float>(suggestRenderTick())`.
+///
+/// Extrapolation past the newest keyframe integrates `linearVelocity * dt` where
+/// `dt` is **seconds** derived from tick delta ÷ [`simulationHz()`] (defaults to 60 Hz).
 template <std::size_t MaxEntities = 16, std::size_t TimelineCapacity = 16>
 class SnapshotInterpolator {
 public:
@@ -56,6 +59,10 @@ public:
 
     void setRenderDelayTicks(std::uint32_t ticks) noexcept { renderDelayTicks_ = ticks; }
     void setMaxExtrapolationTicks(std::uint32_t ticks) noexcept { maxExtrapolationTicks_ = ticks; }
+
+    /// Server fixed-step rate (Hz); used to convert extrapolation tick deltas to seconds. Default 60.
+    void setSimulationHz(float hz) noexcept { simulationHz_ = hz > 1e-5f ? hz : 60.f; }
+    [[nodiscard]] float simulationHz() const noexcept { return simulationHz_; }
 
     /// 0 = disabled. When \|v_new − v_old\| between bracketing frames meets threshold, lerp position but use **newer** velocity (avoid blending through impulses).
     void setVelocityJumpBlendThresholdMps(float metersPerSecond) noexcept {
@@ -271,9 +278,9 @@ private:
         InterpolatedEntity* out,
         std::size_t maxOut
     ) const noexcept {
-        float const delta = std::max(0.f, renderTick - static_cast<float>(frame.simTick));
-        float const clamped = std::min(delta, static_cast<float>(maxExtrapolationTicks_));
-        float const dtDefault = clamped;
+        float const deltaTicks = std::max(0.f, renderTick - static_cast<float>(frame.simTick));
+        float const extrapTicks = std::min(deltaTicks, static_cast<float>(maxExtrapolationTicks_));
+        float const dtDefault = extrapTicks / simulationHz_;
 
         Frame const* prev = nullptr;
         if (frameCount_ >= 2u && velocityJumpExtrapolationThresholdMps_ > 0.f) {
@@ -322,6 +329,7 @@ private:
     std::size_t frameCount_{};
     std::uint32_t renderDelayTicks_{kDefaultRenderDelayTicks};
     std::uint32_t maxExtrapolationTicks_{kDefaultMaxExtrapolationTicks};
+    float simulationHz_{60.f};
     float velocityJumpBlendThresholdMps_{};
     float velocityJumpExtrapolationThresholdMps_{};
 };
